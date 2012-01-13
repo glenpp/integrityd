@@ -1,0 +1,962 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+# TODO put pid files to monitor
+# use logcheck-database (debian)
+
+
+use DBI;
+use Digest::SHA1;
+use Time::HiRes qw(usleep gettimeofday);
+use List::Util qw(shuffle);
+use Sys::Hostname;
+use Sys::Syslog;
+use Proc::Daemon;
+#use Fcntl qw(:DEFAULT O_DIRECT);
+#use IO::AIO qw(fadvise FADV_SEQUENTIAL FADV_NOREUSE FADV_DONTNEED);	# debian: libio-aio-perl
+use IO::AIO;	# debian: libio-aio-perl - need wheezy or later
+
+
+
+# get logging online
+my $logname = $0;
+$logname =~ s/^.*\///;
+openlog $logname, 'ndelay,pid', 'local0';
+syslog 'info', 'Starting up with arguments: '.join(' ',@ARGV);
+
+
+# set command / arguments
+$0 = __FILE__.' '.join(' ',@ARGV);
+
+
+my $DAEMON = 0;
+my $PIDFILE = '/var/run/integrityd.pid';
+my $MAIL = '/usr/bin/mail';
+my $TRANSACTIONPOOL = 100;	# wrap files in a transaction at this rate
+
+
+my $CONFIG = '/etc/integrityd.conf';
+my $email = 'root@localhost';
+my $database = '/var/lib/integrityd/integrityd.sqlite';
+my $byterate = 1048576;    # Bytes / second
+my $filerate = 1;    # Files / second
+my $speedup = 10;	# speed up when changes / emptydb
+my $smallfiles = 131072;	# don't delay on files smaller than this
+my $reporttime = 30;	# pool changes for this long before sending
+my $reportholdoff = 300;	# wait this long after a report before sending again
+my %areas;
+my %excludes;
+my $logchecktime = 30;	# how often to check logs TODO
+my $logruleupdate = 120;	# how often to update log rules TODO
+my $logreporttime = 0;
+my $logreportholdoff = 0;
+my $pidreporttime = 0;
+my $pidreportholdoff = 0;
+my $logrules = '/etc/logcheck';
+my %logfiles;
+my @logfiles;
+my $pidct = 100;
+my %pidfiles;	# CT and PID file
+
+my %logrules;	# the rules areas we need to watch
+my %logrulestimes;	# times
+my %logrulesexpressions;	# rules for each area
+
+
+# Read in the config
+# Everything up to this point may be overridden by the config
+# Now that we have the basics down, override them with the config
+if ( -f $CONFIG ) {
+	open my $inc, '<', $CONFIG or die "$0: FATAL - can't read config: $!\n";
+	while ( defined ( my $line = <$inc> ) ) {
+		chomp $line;
+		if ( $line =~ /#/ or $line =~ /^\s*$/ ) { next; }
+		if ( $line =~ /^(\w+)\s*=\s*([^\s].*)$/ ) {
+			if ( $1 eq 'email' ) {
+				$email = $2;
+			} elsif ( $1 eq 'database' ) {
+				$database = $2;
+			} elsif ( $1 eq 'byterate' ) {
+				$byterate = $2;
+			} elsif ( $1 eq 'filerate' ) {
+				$filerate = $2;
+			} elsif ( $1 eq 'speedup' ) {
+				$speedup = $2;
+			} elsif ( $1 eq 'smallfiles' ) {
+				$smallfiles = $2;
+			} elsif ( $1 eq 'reporttime' ) {
+				$reporttime = $2;
+			} elsif ( $1 eq 'reportholdoff' ) {
+				$reportholdoff = $2;
+			} elsif ( $1 eq 'logreporttime' ) {
+				$logreporttime = $2;
+			} elsif ( $1 eq 'logreportholdoff' ) {
+				$logreportholdoff = $2;
+			} elsif ( $1 eq 'pidreporttime' ) {
+				$pidreporttime = $2;
+			} elsif ( $1 eq 'pidreportholdoff' ) {
+				$pidreportholdoff = $2;
+			} elsif ( $1 eq 'area' ) {
+				my $path = $2;
+				$path =~ s/(.)\/$/$1/;	# strip trailing /
+				$areas{$path} = 1;
+			} elsif ( $1 eq 'exclude' ) {
+				$excludes{$2} = 1;
+			} elsif ( $1 eq 'logrules' ) {
+				$logrules = $2;
+			} elsif ( $1 eq 'log' ) {
+				$logfiles{$2} = $logrules;
+				push @logfiles, $2;
+				$logrules{$logrules} = 1;
+			} elsif ( $1 eq 'pidfile' ) {
+				$pidfiles{$pidct}{$2} = 1;
+			} elsif ( $1 eq 'pidct' ) {
+				$pidct = $2;
+			} else {
+				die "$0: Don't understand config line: $line\n";
+			}
+		} else {
+			die "$0: Don't understand config line: $line\n";
+		}
+	}
+	close $inc;
+}
+# set defaults if none already set
+if ( $logreporttime == 0 ) { $logreporttime = $reporttime; }
+if ( $logreportholdoff == 0 ) { $logreportholdoff = $reportholdoff; }
+if ( $pidreporttime == 0 ) { $pidreporttime = $reporttime; }
+if ( $pidreportholdoff == 0 ) { $pidreportholdoff = $reportholdoff; }
+
+# check our state
+my $emptydb = 0;
+my $speedfactor = 1;
+if ( defined $ARGV[0] and $ARGV[0] eq '--emptydb' ) {
+	$emptydb = 1;
+	$speedfactor = $speedup;
+	syslog 'info', 'Started in empty database mode - skipping reporting and old node checks unil database is populated';
+}
+
+
+# we're all ready to go - daemonise if needed
+if ( $DAEMON ) {
+	if ( -f $PIDFILE ) {
+		die "$0: FATAL - pid file \"$PIDFILE\" already exists\n";
+	}
+	# daemonise
+	my $ret = Proc::Daemon::Init ();
+	if ( ! defined $ret ) {
+		syslog 'err', "FATAL - failed to fork()";
+		die "$0: FATAL - failed to fork()\n";
+	} elsif ( $ret > 0 ) {
+		# we are the parent - no need to go further
+		exit 0;
+	}
+	# we are the child (daemon)
+	# get the PID sorted
+	my $pid;
+	if ( ! open $pid, '>', $PIDFILE ) {
+		syslog 'err', "FATAL - can't write \"$PIDFILE\": $!";
+		die "$0: FATAL - can't write \"$PIDFILE\": $!\n";
+	}
+	print $pid $$;
+	close $pid;
+	# looking good
+	syslog 'info', 'Successfully daemonised';
+}
+# set signal hanlder
+$SIG{'TERM'} = 'exitclean';
+$SIG{'QUIT'} = 'exitclean';
+$SIG{'INT'} = 'exitclean';
+$SIG{'HUP'} = 'exitclean';
+
+
+# get database up
+#my $dbh = DBI->connect ( "DBI:SQLite:dbname=$database",'','',{RaiseError=>+1,AutoCommit=>1} ) or die "Can't connect: ".$DBI::errstr;
+my $dbh = DBI->connect ( "DBI:SQLite:dbname=$database",'','',{RaiseError=>+1,AutoCommit=>0} ) or die "Can't connect: ".$DBI::errstr;
+#$dbh->trace(2);
+# check state of database
+my $st = $dbh->prepare ( 'SELECT COUNT(*) FROM NodeInfo' );
+$st->execute ();
+my $result = $st->fetchrow_hashref ();
+if ( $$result{'COUNT(*)'} == 0 ) {
+	$emptydb = 1;
+	$speedfactor = $speedup;
+	syslog 'info', 'Empty database found - skipping reporting and old node checks unil database is populated';
+}
+
+# TODO clear out old LogPostition entries (logs not in config) TODO
+# make sure entries are in database for current log files
+foreach my $logfile (keys %logfiles) {
+	$st = $dbh->prepare ( 'INSERT OR IGNORE INTO LogPosition (LogFile,Inode,Position) VALUES (?,0,0)' );
+	$st->execute ( $logfile );
+}
+# TODO clear out old PID entries (pid files not in config) TODO
+# TODO make sure entries are in database for current pid files TODO
+
+# measure how long each cycle takes
+my $cycletime;
+
+# get log rules onboard
+checklogrules ();
+
+# flush any reports
+my $lastreport = 0;	# most recent report
+my $oldestreport = 1;
+sendreport ();
+$lastreport = 0;	# reset to start
+my $loglastreport = 0;	# most recent report
+my $logoldestreport = 1;
+sendlogreport ();
+$loglastreport = 0;	# reset to start
+
+
+# main loop
+my $run = 1;
+my $lastlogruleupdate = time();
+my $lastlogcheck = $lastlogruleupdate ;
+my $commitcount = 0;
+while ( $run ) {
+	my $runtime = gettimeofday ();
+	my $nodecount = 0;
+	my $totalsize = 0;
+	my $reshuffle = 0;
+	my $reshuffleat = rand() * 100;
+	my @searchstack;
+	# put initial listings in to help mix it up
+	foreach (keys %areas) {
+		push @searchstack, glob "$_/*";
+		checknode ( $_ );
+	}
+	@searchstack = shuffle @searchstack;
+	# search this area
+	while ( scalar ( @searchstack ) > 0 and $run ) {
+		my $node = pop @searchstack;
+		if ( defined $excludes{$node} ) { next; }
+		# process this node
+		my $size = checknode ( $node );
+		# add more if needed
+		if ( -d $node and ! -l $node ) {
+			push @searchstack, glob "$node/*";
+			@searchstack = shuffle @searchstack;
+		}
+		# do delay
+		$totalsize += $size;
+		++$nodecount;
+		my $reqdelay = $nodecount / ( $filerate * $speedfactor ) + $totalsize / ( $byterate * $speedfactor ) + $runtime - gettimeofday ();
+		if ( $reqdelay > 0 ) { usleep ( $reqdelay * 1000000 ); }
+			else { $runtime -= $reqdelay; }
+		# check longest node in DB
+		if ( ! $emptydb ) {	# skip on first run
+			$st = $dbh->prepare ( 'SELECT Path FROM NodeInfo ORDER BY LastChecked LIMIT 1' );
+			$st->execute ();
+			$result = $st->fetchrow_hashref ();
+			$size = 0;
+			if ( defined $$result{'Path'} ) {
+				# work out exclusions
+				my $excluded = 1;
+				my @parts = split '/', $$result{'Path'};
+				if ( $parts[0] eq '' ) { shift @parts; }
+				my $path = '';
+				if ( defined $areas{'/'} ) { $excluded = 0; }
+#print STDERR "$$result{Path} > $excluded\n";
+				foreach (@parts) {
+					$path .= "/$_";
+#print STDERR "$path # ".((defined $areas{$path})?1:0)."\n";
+#print STDERR "$path ## ".((defined $excludes{$path})?1:0)."\n";
+#print STDERR "$path > $excluded\n";
+					if ( defined $areas{$path} ) { $excluded = 0; }
+#print STDERR "$path >> $excluded\n";
+					if ( defined $excludes{$path} ) { $excluded = 1; }
+#print STDERR "$path >>> $excluded\n";
+				}
+				# now we should know if it's excluded
+				if ( $excluded ) {
+					$st = $dbh->prepare ( 'DELETE FROM NodeInfo WHERE Path = ?' );
+					$st->execute ( $$result{'Path'} );
+#print STDERR "\n\n\n************** DELETED $$result{Path} ******************\n\n\n\n";
+				} else {
+					$size = checknode ( $$result{'Path'} );
+				}
+			}
+			# do delay
+			$totalsize += $size;
+			++$nodecount;
+			$reqdelay = $nodecount / ( $filerate * $speedfactor ) + $totalsize / ( $byterate * $speedfactor ) + $runtime - gettimeofday ();
+			if ( $reqdelay > 0 ) { usleep ( $reqdelay * 1000000 ); }
+				else { $runtime -= $reqdelay; }
+		}
+		# shuffle order periodically to reduce predictability
+		if ( ++$reshuffle > $reshuffleat ) {
+			@searchstack = shuffle @searchstack;
+			$reshuffle = 0;
+			$reshuffleat = rand() * 100;
+		}
+		# logcheck cycle
+		my $now = time();
+		if ( $now - $lastlogcheck >= $logchecktime ) {
+			if ( $now - $lastlogruleupdate >= $logruleupdate ) {
+				checklogrules ();
+				$lastlogruleupdate = $now;
+			}
+			checklogs ();
+			$lastlogcheck = $now;
+			# send reports
+			sendlogreport ();
+		}
+		# send reports
+		sendreport ();
+		# commit to database if needed
+		if ( $commitcount++ >= $TRANSACTIONPOOL ) {
+			$dbh->commit();
+			$commitcount = 0;
+		}
+	}
+print STDERR "Reset emptydb / speedfactor: $emptydb / $speedfactor\n";
+	$emptydb = 0;
+	$speedfactor = 1;
+	# find cycle time
+	$cycletime = int ( ( gettimeofday () - $runtime ) / 360 ) / 10;
+print STDERR "Cycle: $cycletime\n\n";
+#exit 0;
+}
+
+syslog 'info', 'Exiting';
+# cleanup reports as we exit
+$lastreport = 0;
+$oldestreport = 1;
+sendreport ();
+# one final log check and cleanup reports as we exit
+checklogs ();
+$loglastreport = 0;
+$logoldestreport = 1;
+sendlogreport ();
+# TODO report our exit
+# clean up transactions
+$dbh->commit();
+# remove PID
+if ( $DAEMON ) { unlink $PIDFILE; }
+
+
+
+
+
+
+sub checknode {
+	my ( $path ) = @_;
+#print "\n------------\nProcessing $path\n";
+	my @stat;
+	if ( -l $path ) {
+		@stat = lstat $path;
+	} else {
+		@stat = stat $path;
+	}
+	my %fields = (
+		'UID' => $stat[4],
+		'GID' => $stat[5],
+		'Links' => $stat[3],
+		'Inode' => $stat[1],
+		'Perms' => (defined $stat[2])?sprintf ( '%04o', $stat[2] ):undef,
+		'CTime' => $stat[10],
+		'Size' => $stat[7],
+		'SHA1' => undef,
+		'LinkDest' => undef,
+	);
+	if ( -l $path ) {
+		# sumlink
+		$fields{'LinkDest'} = readlink $path;
+		$fields{'Type'} = 'Symlink';	# overridden by type
+	}
+	my $size = 0;
+	if ( -f $path ) {
+		$size = $stat[7];
+		# file
+		if ( ! open my $file, '<', $path ) {
+			syslog 'err', "ERROR - can't read file \"$path\": $!";
+		} else {
+			my $buffer = '';
+			my $sha1 = Digest::SHA1->new;
+			my $starttime = gettimeofday ();
+			my $totalsize = 0;
+			# advise kernel on file access patterns to avoid wasted caching
+			IO::AIO::fadvise $file, 0, 0, IO::AIO::FADV_DONTNEED;
+			if ( $size <= $smallfiles ) {
+#print STDERR "quickread\n";
+				# fast read - no delays
+				while ( ( my $read = read $file, $buffer, 4096 ) > 0 ) {
+					$sha1->add ( $buffer );
+				}
+			} else {
+#print STDERR "slowread\n";
+				while ( ( my $read = read $file, $buffer, 4096 ) > 0 ) {
+					$sha1->add ( $buffer );
+					$totalsize += $read;
+					my $reqdelay = $totalsize / ( $byterate * $speedfactor ) + $starttime - gettimeofday ();
+					if ( $reqdelay > 0 ) { usleep ( $reqdelay * 1000000 ); }
+				}
+			}
+			close $file;
+			$fields{'SHA1'} = $sha1->hexdigest ();
+		}
+		$fields{'Type'} = 'File';
+	} elsif ( -d $path ) {
+		# directory
+		$fields{'Type'} = 'Dir';
+	} elsif ( -p $path ) {
+		# FIFO
+		$fields{'Type'} = 'FIFO';
+	} elsif ( -S $path ) {
+		# socket
+		$fields{'Type'} = 'Socket';
+	} elsif ( -b $path ) {
+		# block dev
+		$fields{'Type'} = 'BlockDev';
+	} elsif ( -c $path ) {
+		# char dev
+		$fields{'Type'} = 'CharDev';
+	} elsif ( ! -e $path and ! -l $path ) {
+		# nothing there
+		undef %fields;
+#print "non-exist: $path\n";
+		syslog 'warning', "WARNING - tried to check non-existant node \"$path\"";
+	} elsif ( ! -l $path ) {
+		# that's weird
+		syslog 'err', "ERROR - don't know type for \"$path\"";
+		$fields{'Type'} = 'Unknown';
+	}
+	# check for changes
+	my $st = $dbh->prepare ( 'SELECT * FROM NodeInfo WHERE Path = ?' );
+	$st->execute ( $path );
+#print STDERR "SELECT * FROM NodeInfo WHERE Path = ?\n";
+#print STDERR "\t\"".$path."\"\n";
+	my $result = $st->fetchrow_hashref ();
+#print STDERR "----\n> $path\n";
+#foreach (keys %fields) { print STDERR ">> $_ : $fields{$_}\n"; }
+#foreach (keys %$result) { print STDERR ">>> $_ : $$result{$_}\n"; }
+	if ( defined $$result{'id'} ) {
+		my $id = $$result{'id'};
+		delete $$result{'id'};
+		delete $$result{'Path'};
+		delete $$result{'LastChecked'};
+		if ( %fields ) {
+			# check it's the same node
+			foreach my $col (keys %$result) {
+				if (
+					( defined $$result{$col} xor defined $fields{$col} )
+					or ( defined $$result{$col} and defined $fields{$col}
+						and $$result{$col} ne $fields{$col} )
+					) {
+					# file changed
+					$speedfactor = $speedup;	# changes - speedup
+					report ( $path, 'Changed', $result, \%fields );
+					# update database
+					my $cols = 'LastChecked = ?';
+					my @params = ( time() );
+					foreach (keys %fields) {
+						$cols .= ", $_ = ?";
+						push @params, $fields{$_};
+					}
+					push @params, $path;
+					foreach ('Size','SHA1','LinkDest') {
+						
+					}
+# TODO what about stuff changed to NULL TODO
+					$st = $dbh->prepare ( "UPDATE NodeInfo SET $cols WHERE Path = ?" );
+					$st->execute ( @params );
+					last;
+				}
+			}
+		} else {
+#syslog 'warning', "DB DELETE - tried to check non-existant node \"$path\"";
+			# nothing there - node vanished
+			$speedfactor = $speedup;	# changes - speedup
+			report ( $path, 'Deleted', $result, undef );
+			# update database
+#print STDERR ">>$path\n";
+#print STDERR "DELETE FROM NodeInfo WHERE id = ?\n";
+#print STDERR "\t".$id."\n";
+			$st = $dbh->prepare ( 'DELETE FROM NodeInfo WHERE id = ?' );
+			$st->execute ( $id );
+		}
+		# update LastChecked
+		$st = $dbh->prepare ( 'UPDATE NodeInfo SET LastChecked = ? WHERE Path = ?' );
+		$st->execute ( time(), $path );
+	} else {
+		if ( %fields ) {
+			# new node
+			$speedfactor = $speedup;	# changes - speedup
+			report ( $path, 'New', undef, \%fields );
+			# add to database
+			my $cols = 'Path,LastChecked';
+			my $values = '?,?';
+			my @params = ( $path, time() );
+			foreach (keys %fields) {
+				$cols .= ",$_";
+				$values .= ',?';
+				push @params, $fields{$_};
+			}
+#print STDERR "INSERT INTO NodeInfo ($cols) VALUES ($values)\n";
+#print STDERR "\t".join ( "\n\t", @params )."\n";
+			$st = $dbh->prepare ( "INSERT INTO NodeInfo ($cols) VALUES ($values)" );
+			$st->execute ( @params );
+		} else {
+			# nothing exists before or after - no change
+		}
+	}
+	# all done
+	return $size;
+}
+
+
+sub report {
+	my ( $path, $event, $before, $after ) = @_;
+	if ( $emptydb ) { return; }	# skip on first run
+	my $notes = "$event: $path\n";
+	if ( defined $before ) {
+		foreach my $field (sort keys %$before) {
+			my $prev = '';
+			my $post = '';
+			if ( defined $$before{$field} ) {
+				if ( $field eq 'CTime' ) {
+					my @localtime = localtime $$before{$field};
+					$notes .= sprintf "\t$field: %02d/%02d/%04d %02d:%02d:%02d\n",
+								$localtime[3], $localtime[4]+1, $localtime[5]+1900,
+								$localtime[2], $localtime[1], $localtime[0];
+				} else {
+					$notes .= "\t$field: $$before{$field}\n";
+				}
+				$prev = $$before{$field};
+			} else {
+				$notes .= "\t$field: NONE\n";
+			}
+			my $spacer = $field;
+			$spacer =~ s/[^ ]/ /g;
+			$spacer =~ s/.$/=> /;
+			$notes .= "\t$spacer";
+			if ( defined $$after{$field} ) {
+				if ( $field eq 'CTime' ) {
+					my @localtime = localtime $$after{$field};
+					$notes .= sprintf "%02d/%02d/%04d %02d:%02d:%02d",
+								$localtime[3], $localtime[4]+1, $localtime[5]+1900,
+								$localtime[2], $localtime[1], $localtime[0];
+				} else {
+					$notes .= $$after{$field};
+				}
+				$post = $$after{$field};
+			} else {
+				$notes .= 'NONE';
+			}
+			if ( $prev ne $post ) {
+				$notes .= ' **CHANGE**';
+			}
+			$notes .= "\n";
+		}
+	} elsif ( defined $after ) {
+		foreach (sort keys %$after ) {
+			if ( ! defined $$after{$_} ) { next; }
+			$notes .= "\t$_: $$after{$_}\n";
+		}
+	}
+	$st = $dbh->prepare ( "INSERT INTO Report (Path,Notes,Time) VALUES (?,?,?)" );
+	$st->execute ( $path, $notes, time() );
+	$dbh->commit();
+	if ( $oldestreport == 0 ) { $oldestreport = time(); }
+}
+
+
+sub sendreport {
+	if ( time() - $lastreport < $reportholdoff
+		or $oldestreport == 0
+		or time() - $oldestreport < $reporttime ) { return; }
+	# see what's in the database
+	$st = $dbh->prepare ( 'SELECT * FROM Report' );
+	$st->execute ();
+	$result = $st->fetchall_hashref ( 'id' );
+	if ( scalar ( keys %$result ) == 0 ) {
+		# nothing to do
+		return;
+	}
+	# it's time to send
+	my $host = hostname();
+	my $mail;
+	if ( ! open $mail, '|-', "$MAIL -s 'Report for $host' '$email'" ) {
+		syslog 'err', "ERROR - can't run \"$MAIL -s 'Report for $host' '$email'\": $!";
+		return;
+	}
+	print $mail "Reports from $0 on $host:\n\n";
+	foreach my $id ( keys %$result ) {
+		my @localtime = localtime $$result{$id}{'Time'};
+		printf $mail "At %02d/%02d/%04d %02d:%02d:%02d:\n",
+				$localtime[3], $localtime[4]+1, $localtime[5]+1900,
+				$localtime[2], $localtime[1], $localtime[0];
+		print $mail $$result{$id}{'Notes'}."\n";
+	}
+	if ( defined $cycletime ) {
+		print $mail "\nLast Cycle Time: $cycletime hours\n"
+	}
+	close $mail;
+	$lastreport = time();
+	# clear reports
+	$st = $dbh->prepare ( 'DELETE FROM Report' );
+	$st->execute ();
+	$dbh->commit();
+	$oldestreport = 0;
+}
+
+
+sub checklogrules {
+	foreach my $area (keys %logrules) {
+		my @ruledirs = ('cracking.d','cracking.ignore.d','violations.d','violations.ignore.d');
+		my $ruleshome = $area;
+		if ( $area =~ /^(\w+):(\/.+)$/ ) {
+			push @ruledirs, 'ignore.d.'.$1;
+			$ruleshome = $2;
+		} else {
+			push @ruledirs, 'ignore.d.server';
+		}
+		# check for removed files
+		for my $ruledir (keys %{$logrulestimes{$ruleshome}}) {
+			foreach my $file (keys %{$logrulestimes{$ruleshome}{$ruledir}}) {
+				if ( ! -f "$ruleshome/$ruledir/$file" ) {
+print STDERR "Remove old \"$ruleshome/$ruledir/$file\"\n";
+					delete $logrulestimes{$ruleshome}{$ruledir}{$file};
+					delete $logrulesexpressions{$ruleshome}{$ruledir}{$file};
+				}
+			}
+		}
+		# check for new/updated files TODO
+		for my $ruledir (@ruledirs) {
+			opendir my $ls, "$ruleshome/$ruledir" or next;
+			while ( defined ( my $file = readdir $ls ) ) {
+				if ( $file =~ /^\./ ) { next; }
+				if ( ! exists $logrulestimes{$ruleshome}{$ruledir}{$file}
+					or $logrulestimes{$ruleshome}{$ruledir}{$file} != -M "$ruleshome/$ruledir/$file" ) {
+print STDERR "Add/Update new \"$ruleshome/$ruledir/$file\"\n";
+					# update rules TODO
+					open my $rules, '<', "$ruleshome/$ruledir/$file" or next;
+					my @rules;
+					while ( defined ( my $line = <$rules> ) ) {
+						chomp $line;
+						if ( $line =~ /^#/ or $line =~ /^\s*$/ ) { next; }
+						push @rules, $line;
+					}
+					close $rules;
+					$logrulesexpressions{$ruleshome}{$ruledir}{$file} = \@rules;
+					# set new time
+					$logrulestimes{$ruleshome}{$ruledir}{$file} = -M "$ruleshome/$ruledir/$file";
+				}
+			}
+			closedir $ls;
+		}
+	}
+}
+
+
+sub checklogs {
+	foreach (keys %logfiles) { checklog ( $_ ); }
+	sendlogreport ();
+}
+
+
+sub checklog {
+	my ( $logfile ) = @_;
+	# check existing position / inode
+	$st = $dbh->prepare ( 'SELECT Inode,Position FROM LogPosition WHERE LogFile = ?' );
+	$st->execute ( $logfile );
+	my $result = $st->fetchrow_hashref ();
+	# look at the file
+	open my $log, '<', $logfile or return undef;
+	my @stat = stat $log;
+	my $position = 0;
+	if ( defined $$result{'Inode'} and $$result{'Inode'} == $stat[1]
+		and defined $$result{'Position'} and $$result{'Position'} <= $stat[7] ) {
+		# it's the same file - we can start from where we where
+		seek $log, $$result{'Position'}, 0;
+		$position = $$result{'Position'};
+	}
+	# figure out what we are checking against
+	my $ruleshome = $logfiles{$logfile};
+	my $ignorerule = 'ignore.d.server';
+	if ( $ruleshome =~ /^(\w+):(\/.+)$/ ) {
+		$ignorerule = 'ignore.d.'.$1;
+		$ruleshome = $2;
+	}
+	# process file
+	while ( defined ( my $line = <$log> ) ) {
+		if ( $line =~ /\n$/ ) {
+			chomp $line;
+			$position = tell $log;
+			# process the log against the rules
+			my $in = 0;
+			CR: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{'cracking.d'}}) {
+				foreach my $rule (@{$logrulesexpressions{$ruleshome}{'cracking.d'}{$rulesfile}}) {
+					if ( $line =~ /$rule/ ) { $in = 1; last CR; }
+				}
+			}
+			if ( $in ) {
+				CRI: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{'cracking.ignore.d'}}) {
+					foreach my $rule (@{$logrulesexpressions{$ruleshome}{'cracking.ignore.d'}{$rulesfile}}) {
+						if ( $line =~ /$rule/ ) { $in = 0; last CRI; }
+					}
+				}
+			}
+			if ( $in ) {
+				# this is a cracking line
+				$st = $dbh->prepare ( 'INSERT INTO LogReport (LogFile,Line,Priority) VALUES (?,?,\'cracking\')' );
+				$st->execute ( $logfile, $line );
+				if ( $logoldestreport == 0 ) { $logoldestreport = time(); }
+				next;
+			}
+			VR: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{'violations.d'}}) {
+				foreach my $rule (@{$logrulesexpressions{$ruleshome}{'violations.d'}{$rulesfile}}) {
+					if ( $line =~ /$rule/ ) { $in = 1; last VR; }
+				}
+			}
+			if ( $in ) {
+				VRI: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{'violations.ignore.d'}}) {
+					foreach my $rule (@{$logrulesexpressions{$ruleshome}{'violations.ignore.d'}{$rulesfile}}) {
+						if ( $line =~ /$rule/ ) { $in = 0; last VRI; }
+					}
+				}
+			}
+			if ( $in ) {
+				# this is a cracking line
+				$st = $dbh->prepare ( 'INSERT INTO LogReport (LogFile,Line,Priority) VALUES (?,?,\'violations\')' );
+				$st->execute ( $logfile, $line );
+				if ( $logoldestreport == 0 ) { $logoldestreport = time(); }
+				next;
+			}
+			# anything else that should just be ignored
+			$in = 1;
+			IR: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{$ignorerule}}) {
+				foreach my $rule (@{$logrulesexpressions{$ruleshome}{$ignorerule}{$rulesfile}}) {
+					if ( $line =~ /$rule/ ) { $in = 0; last IR; }
+				}
+			}
+			if ( $in ) {
+				# this is a cracking line
+				$st = $dbh->prepare ( 'INSERT INTO LogReport (LogFile,Line,Priority) VALUES (?,?,\'normal\')' );
+				$st->execute ( $logfile, $line );
+				if ( $logoldestreport == 0 ) { $logoldestreport = time(); }
+				next;
+			}
+		} else {
+			# we got an incomplete line - must be the end
+			last;
+		}
+	}
+	close $log;
+	# put new position info in the database
+	$st = $dbh->prepare ( 'UPDATE LogPosition SET Inode = ?, Position = ? WHERE LogFile = ?' );
+	$st->execute ( $stat[1], $position, $logfile );
+	$dbh->commit();
+}
+
+sub sendlogreport {
+	# check what's available
+	my $st = $dbh->prepare ( 'SELECT Priority,COUNT(*) FROM LogReport GROUP BY Priority' );
+	$st->execute ();
+	my $result = $st->fetchall_hashref ( 'Priority' );
+	my $mustsend = 0;
+	my $now = time();
+	# check for cracking - we always send
+	if ( defined $$result{'cracking'}{'COUNT(*)'} and $$result{'cracking'}{'COUNT(*)'} > 0 ) { $mustsend = 1; }
+	# check for violations - we send if not pooling
+	elsif ( defined $$result{'violations'}{'COUNT(*)'} and $$result{'violations'}{'COUNT(*)'} > 0
+		and $now - $logoldestreport >= $logreporttime ) { $mustsend = 1; }
+	# check for anything to send
+	elsif ( defined $$result{'normal'} and $$result{'normal'}{'COUNT(*)'} > 0 
+		and $now - $loglastreport >= $logreportholdoff
+		and $logoldestreport > 0
+		and $now - $logoldestreport >= $logreporttime ) { $mustsend = 1; }
+	if ( ! $mustsend ) { return; }
+	# see what's in the database
+	$st = $dbh->prepare ( 'SELECT * FROM LogReport' );
+	$st->execute ();
+	$result = $st->fetchall_hashref ( 'id' );
+	if ( scalar ( keys %$result ) == 0 ) {
+		# nothing to do
+		return;
+	}
+	my %classes;
+	foreach my $id ( keys %$result ) {
+		$classes{$$result{$id}{'Priority'}}{$$result{$id}{'LogFile'}}{$id} = 1;
+	}
+	# it's time to send
+	my $host = hostname();
+	my $mail;
+	if ( ! open $mail, '|-', "$MAIL -s 'Log Report for $host' '$email'" ) {
+		syslog 'err', "ERROR - can't run \"$MAIL -s 'Log Report for $host' '$email'\": $!";
+		return;
+	}
+	print $mail "LogReports from $0 on $host:\n\n";
+	# big one - order by priority, file TODO
+	for my $priority ('cracking','violations','normal') {
+		for my $logfile (@logfiles) {
+			if ( defined $classes{$priority}{$logfile} ) {
+				my $header = "$priority :: $logfile :";
+				print $mail "$header\n";
+				$header =~ s/./-/g;
+				print $mail "$header\n";
+			} else {
+				next;
+			}
+			for my $id (sort keys %{$classes{$priority}{$logfile}}) {
+				print $mail $$result{$id}{'Line'}."\n";
+			}
+			print $mail "\n\n";
+		}
+	}
+	if ( defined $cycletime ) {
+		print $mail "\nLast Cycle Time: $cycletime hours\n"
+	}
+	close $mail;
+	$loglastreport = $now;
+	# clear reports
+	$st = $dbh->prepare ( 'DELETE FROM LogReport' );
+	$st->execute ();
+	$dbh->commit();
+	$logoldestreport = 0;
+}
+
+
+sub checkpids {
+	my $report = '';
+	foreach my $ct (keys %pidfiles) {
+		foreach my $pidfile (keys %{$pidfiles{$ct}}) {
+			# get last
+			$st = $dbh->prepare ( 'SELECT HostPID,CTPID,PidFileExists,Alive,LastChecked FROM PID WHERE File = ?' );
+			$st->execute ( $pidfile );
+			# prep to check current status
+			my $pidfileexist = 0;
+			my $alive = 0;
+			my $pid = 0;
+			my $hostpid = undef;
+			if ( -f $pidfile ) {
+				$pidfileexist = 1;
+				open my $pidf, '<', $pidfile;
+				$pid = <$pidf>;
+				chomp $pid;
+				close $pidf;
+				my $status;
+				if ( $ct == 100 ) {
+					# host - no PID mapping
+					$status = getpidstatus ( $pid );
+				} else {
+					# look at envID (CT) and VPid (PID in CT)
+					if ( $$result{'CTPID'} == $pid ) {
+						$hostpid = $$result{'HostPID'};
+					} else {
+						$hostpid = findctpid ( $pid, $ct );
+					}
+					$status = getpidstatus ( $hostpid );
+				}
+				if ( $status ne 'Z' ) {
+					$alive = 1;
+				}
+			}
+			my $result = $st->fetchrow_hashref ();
+			# check for status change
+			my $change = '';
+			# PidFileExists?
+			if ( $$result{'PidFileExists'} != $pidfileexist ) {
+				if ( $pidfileexist ) {
+					$change .= 'PID file created';
+				} else {
+					$change .= 'PID file removed';
+				}
+			}
+			# Alive?
+			if ( $$result{'Alive'} != $alive ) {
+				if ( $change ne '' ) { $change .= ' : '; }
+				if ( $alive ) {
+					$change .= 'Process Started';
+				} else {
+					$change .= 'Process Stopped';
+				}
+			}
+			if ( $ct == 100 ) {
+				# HostPID?
+				if ( $$result{'HostPID'} != $pid ) {
+					if ( $change ne '' ) { $change .= ' : '; }
+					if ( $pid ) {
+						$change .= 'PID changed from '.$$result{'HostPID'}." to $pid";
+					} else {
+						$change .= "PID $pid removed";
+					}
+				}
+			} else {
+				# HostPID?
+				if ( $$result{'HostPID'} != $hostpid ) {
+					if ( $change ne '' ) { $change .= ' : '; }
+					if ( $hostpid ) {
+						$change .= 'HostPID changed from '.$$result{'HostPID'}." to $hostpid";
+					} else {
+						$change .= "HostPID $hostpid removed";
+					}
+				}
+				# CTPID?
+				if ( $$result{'CTPID'} != $pid ) {
+					if ( $change ne '' ) { $change .= ' : '; }
+					if ( $pid ) {
+						$change .= 'CTPID changed from '.$$result{'CTPID'}." to $pid";
+					} else {
+						$change .= "CTPID $pid removed";
+					}
+				}
+			}
+			# did we generate a change?
+			if ( $change ne '' ) {
+				# TODO get last time
+				# TODO update database
+			} else {
+				# TODO update database LastChecked
+			}
+		}
+	}
+}
+
+sub getpidstatus {
+	my ( $pid ) = @_;
+	open my $st, '<', "/proc/$pid/status" or return undef;
+	my $state;
+	while ( defined ( my $line = <$st> ) ) {
+		if ( $line =~ /State:\s*(\w)\s+\(\w+\)$/ ) {
+			$state = $1;
+			last;
+		}
+	}
+	close $st;
+	return $state;
+}
+
+sub findctpid {
+	my ( $ctpid, $ct ) = @_;
+	foreach my $proc (glob '/proc/*/status') {
+		open my $st, '<', $proc or next;
+		my $envid = 0;
+		my $vpid = 0;
+		while ( defined ( my $line = <$st> ) ) {
+			if ( $line =~ /^envID:\s*(\d+)$/ ) {
+				$envid = $1;
+			} elsif ( $line =~ /^VPid:\s*(\d+)$/ ) {
+				$vpid = $1;
+			}
+			if ( $vpid == $ctpid and $envid == $ct
+				and $proc =~ /^\/proc\/(\d+)\/status$/ ) {
+				# found it
+				return $1;
+			}
+		}
+		close $st;
+	}
+	return undef;
+}
+
+
+sub exitclean {
+	$run = 0;
+}
+
+
+
+
