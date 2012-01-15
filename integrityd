@@ -50,13 +50,12 @@ my $logchecktime = 30;	# how often to check logs TODO
 my $logruleupdate = 120;	# how often to update log rules TODO
 my $logreporttime = 0;
 my $logreportholdoff = 0;
-my $pidreporttime = 0;
-my $pidreportholdoff = 0;
 my $logrules = '/etc/logcheck';
 my %logfiles;
 my @logfiles;
 my $pidct = 100;
 my %pidfiles;	# CT and PID file
+my $pidchecktime = 30;	# how often to check PIDs TODO
 
 my %logrules;	# the rules areas we need to watch
 my %logrulestimes;	# times
@@ -92,10 +91,6 @@ if ( -f $CONFIG ) {
 				$logreporttime = $2;
 			} elsif ( $1 eq 'logreportholdoff' ) {
 				$logreportholdoff = $2;
-			} elsif ( $1 eq 'pidreporttime' ) {
-				$pidreporttime = $2;
-			} elsif ( $1 eq 'pidreportholdoff' ) {
-				$pidreportholdoff = $2;
 			} elsif ( $1 eq 'area' ) {
 				my $path = $2;
 				$path =~ s/(.)\/$/$1/;	# strip trailing /
@@ -124,8 +119,6 @@ if ( -f $CONFIG ) {
 # set defaults if none already set
 if ( $logreporttime == 0 ) { $logreporttime = $reporttime; }
 if ( $logreportholdoff == 0 ) { $logreportholdoff = $reportholdoff; }
-if ( $pidreporttime == 0 ) { $pidreporttime = $reporttime; }
-if ( $pidreportholdoff == 0 ) { $pidreportholdoff = $reportholdoff; }
 
 # check our state
 my $emptydb = 0;
@@ -184,14 +177,42 @@ if ( $$result{'COUNT(*)'} == 0 ) {
 	syslog 'info', 'Empty database found - skipping reporting and old node checks unil database is populated';
 }
 
-# TODO clear out old LogPostition entries (logs not in config) TODO
 # make sure entries are in database for current log files
+my $qstr = '';
+my @files;
 foreach my $logfile (keys %logfiles) {
 	$st = $dbh->prepare ( 'INSERT OR IGNORE INTO LogPosition (LogFile,Inode,Position) VALUES (?,0,0)' );
 	$st->execute ( $logfile );
+	if ( $qstr eq '' ) {
+		$qstr .= '?';
+	} else {
+		$qstr .= ',?';
+	}
+	push @files, $logfile;
 }
-# TODO clear out old PID entries (pid files not in config) TODO
-# TODO make sure entries are in database for current pid files TODO
+# clear out old LogPostition entries (logs not in config)
+$st = $dbh->prepare ( 'DELETE FROM LogPosition Where LogFile NOT IN ('.$qstr.')' );
+$st->execute ( @files );
+# make sure entries are in database for current pid files
+$qstr = '';
+undef @files;
+foreach my $ct (keys %pidfiles) {
+	foreach my $file (keys %{$pidfiles{$ct}}) {
+		$st = $dbh->prepare ( 'INSERT OR IGNORE INTO PID (File,HostPID,CT,CTPID,PidFileExists,Alive) VALUES (?,0,?,0,0,0)' );
+		$st->execute ( $file, $ct );
+		if ( $qstr eq '' ) {
+			$qstr .= '?';
+		} else {
+			$qstr .= ',?';
+		}
+		push @files, $file;
+	}
+}
+# clear out old PID entries (pid files not in config)
+$st = $dbh->prepare ( 'DELETE FROM PID Where File NOT IN ('.$qstr.')' );
+$st->execute ( @files );
+# commit database prep
+$dbh->commit();
 
 # measure how long each cycle takes
 my $cycletime;
@@ -212,8 +233,9 @@ $loglastreport = 0;	# reset to start
 
 # main loop
 my $run = 1;
-my $lastlogruleupdate = time();
-my $lastlogcheck = $lastlogruleupdate ;
+my $lastlogruleupdate = $^T;
+my $lastlogcheck = $^T - $logchecktime;
+my $lastpidcheck = $^T - $pidchecktime;
 my $commitcount = 0;
 while ( $run ) {
 	my $runtime = gettimeofday ();
@@ -303,6 +325,12 @@ while ( $run ) {
 			# send reports
 			sendlogreport ();
 		}
+		# pidcheck cycle
+		if ( $now - $lastpidcheck >= $pidchecktime ) {
+			checkpids ();
+			$lastpidcheck = $now;
+		}
+
 		# send reports
 		sendreport ();
 		# commit to database if needed
@@ -826,35 +854,41 @@ sub checkpids {
 			# get last
 			$st = $dbh->prepare ( 'SELECT HostPID,CTPID,PidFileExists,Alive,LastChecked FROM PID WHERE File = ?' );
 			$st->execute ( $pidfile );
+			my $result = $st->fetchrow_hashref ();
 			# prep to check current status
 			my $pidfileexist = 0;
 			my $alive = 0;
 			my $pid = 0;
-			my $hostpid = undef;
+			my $ctpid = 0;
+			my $hostpid = 0;
 			if ( -f $pidfile ) {
 				$pidfileexist = 1;
 				open my $pidf, '<', $pidfile;
 				$pid = <$pidf>;
 				chomp $pid;
+				$pid =~ s/^\s+//;
+				$pid =~ s/\s+$//;
 				close $pidf;
 				my $status;
 				if ( $ct == 100 ) {
 					# host - no PID mapping
-					$status = getpidstatus ( $pid );
+					$hostpid = $pid;
+					$status = getpidstatus ( $hostpid );
 				} else {
 					# look at envID (CT) and VPid (PID in CT)
-					if ( $$result{'CTPID'} == $pid ) {
-						$hostpid = $$result{'HostPID'};
+					$ctpid = $pid;
+					if ( $$result{'CTPID'} == $ctpid ) {
+						# should really re-check
+						$hostpid = findctpid ( $ctpid, $ct, $$result{'HostPID'} );
 					} else {
-						$hostpid = findctpid ( $pid, $ct );
+						$hostpid = findctpid ( $ctpid, $ct );
 					}
 					$status = getpidstatus ( $hostpid );
 				}
-				if ( $status ne 'Z' ) {
+				if ( defined $status and $status ne 'Z' ) {
 					$alive = 1;
 				}
 			}
-			my $result = $st->fetchrow_hashref ();
 			# check for status change
 			my $change = '';
 			# PidFileExists?
@@ -876,12 +910,12 @@ sub checkpids {
 			}
 			if ( $ct == 100 ) {
 				# HostPID?
-				if ( $$result{'HostPID'} != $pid ) {
+				if ( $$result{'HostPID'} != $hostpid ) {
 					if ( $change ne '' ) { $change .= ' : '; }
 					if ( $pid ) {
-						$change .= 'PID changed from '.$$result{'HostPID'}." to $pid";
+						$change .= 'PID changed from '.$$result{'HostPID'}." to $hostpid";
 					} else {
-						$change .= "PID $pid removed";
+						$change .= "PID $$result{HostPID} removed";
 					}
 				}
 			} else {
@@ -891,27 +925,57 @@ sub checkpids {
 					if ( $hostpid ) {
 						$change .= 'HostPID changed from '.$$result{'HostPID'}." to $hostpid";
 					} else {
-						$change .= "HostPID $hostpid removed";
+						$change .= "HostPID $$result{HostPID} removed";
 					}
 				}
 				# CTPID?
-				if ( $$result{'CTPID'} != $pid ) {
+				if ( $$result{'CTPID'} != $ctpid ) {
 					if ( $change ne '' ) { $change .= ' : '; }
-					if ( $pid ) {
-						$change .= 'CTPID changed from '.$$result{'CTPID'}." to $pid";
+					if ( $ctpid ) {
+						$change .= 'CTPID changed from '.$$result{'CTPID'}." to $ctpid";
 					} else {
-						$change .= "CTPID $pid removed";
+						$change .= "CTPID $$result{CTPID} removed";
 					}
 				}
 			}
 			# did we generate a change?
 			if ( $change ne '' ) {
-				# TODO get last time
-				# TODO update database
+				# get last time
+				my $lasttime;
+				if ( $$result{'LastChecked'} == 0 ) {
+					$lasttime = 'Never';
+				} else {
+					my @localtime = localtime $$result{'LastChecked'};
+					$lasttime = sprintf "%02d/%02d/%04d %02d:%02d:%02d\n",
+						$localtime[3], $localtime[4]+1, $localtime[5]+1900,
+						$localtime[2], $localtime[1], $localtime[0];
+				}
+				# put in report
+				$report .= "$pidfile:\n\t$change\n\tLast Checked: $lasttime\n";
+				# update database
+				$st = $dbh->prepare ( 'UPDATE PID SET HostPID = ?, CTPID = ?, PidFileExists = ?, Alive = ?, LastChecked = ? WHERE File = ?' );
+				$st->execute ( $hostpid, $ctpid, $pidfileexist, $alive, time(), $pidfile );
 			} else {
-				# TODO update database LastChecked
+				# update database LastChecked
+				$st = $dbh->prepare ( 'UPDATE PID SET LastChecked = ? WHERE File = ?' );
+				$st->execute ( time(), $pidfile );
 			}
 		}
+	}
+	# report changes
+	if ( $report ne '' ) {
+		my $host = hostname();
+		my $mail;
+		if ( ! open $mail, '|-', "$MAIL -s 'PID Report for $host' '$email'" ) {
+			syslog 'err', "ERROR - can't run \"$MAIL -s 'PID Report for $host' '$email'\": $!";
+			return;
+		}
+		print $mail "PIDReports from $0 on $host:\n\n";
+		print $mail "$report\n";
+		if ( defined $cycletime ) {
+			print $mail "\nLast Cycle Time: $cycletime hours\n"
+		}
+		close $mail;
 	}
 }
 
@@ -930,7 +994,26 @@ sub getpidstatus {
 }
 
 sub findctpid {
-	my ( $ctpid, $ct ) = @_;
+	my ( $ctpid, $ct, $prevhostpid ) = @_;
+	# check the previous pid as a shortcut if we can
+	if ( defined $prevhostpid
+		and open my $st, '<', "/proc/$prevhostpid/status" ) {
+		my $envid = 0;
+		my $vpid = 0;
+		while ( defined ( my $line = <$st> ) ) {
+			if ( $line =~ /^envID:\s*(\d+)$/ ) {
+				$envid = $1;
+			} elsif ( $line =~ /^VPid:\s*(\d+)$/ ) {
+				$vpid = $1;
+			}
+			if ( $vpid == $ctpid and $envid == $ct ) {
+				# found it
+				return $prevhostpid;
+			}
+		}
+		close $st;
+	}
+	# search all pids for this ctpid / ct
 	foreach my $proc (glob '/proc/*/status') {
 		open my $st, '<', $proc or next;
 		my $envid = 0;
