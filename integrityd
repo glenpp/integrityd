@@ -29,7 +29,7 @@ syslog 'info', 'Starting up with arguments: '.join(' ',@ARGV);
 $0 = __FILE__.' '.join(' ',@ARGV);
 
 
-my $DAEMON = 0;
+my $DAEMON = 1;
 my $PIDFILE = '/var/run/integrityd.pid';
 my $MAIL = '/usr/bin/mail';
 my $TRANSACTIONPOOL = 100;	# wrap files in a transaction at this rate
@@ -40,7 +40,7 @@ my $email = 'root@localhost';
 my $database = '/var/lib/integrityd/integrityd.sqlite';
 my $byterate = 1048576;    # Bytes / second
 my $filerate = 1;    # Files / second
-my $speedup = 10;	# speed up when changes / emptydb
+my $speedup = 20;	# speed up when changes / emptydb
 my $smallfiles = 131072;	# don't delay on files smaller than this
 my $reporttime = 30;	# pool changes for this long before sending
 my $reportholdoff = 300;	# wait this long after a report before sending again
@@ -619,7 +619,8 @@ sub sendreport {
 		print $mail $$result{$id}{'Notes'}."\n";
 	}
 	if ( defined $cycletime ) {
-		print $mail "\nLast Cycle Time: $cycletime hours\n"
+		print $mail "\nLast Cycle Time: $cycletime hours\n";
+		print $mail "Speed Factor: $speedfactor\n";
 	}
 	close $mail;
 	$lastreport = time();
@@ -645,7 +646,7 @@ sub checklogrules {
 		for my $ruledir (keys %{$logrulestimes{$ruleshome}}) {
 			foreach my $file (keys %{$logrulestimes{$ruleshome}{$ruledir}}) {
 				if ( ! -f "$ruleshome/$ruledir/$file" ) {
-print STDERR "Remove old \"$ruleshome/$ruledir/$file\"\n";
+#print STDERR "Remove old \"$ruleshome/$ruledir/$file\"\n";
 					delete $logrulestimes{$ruleshome}{$ruledir}{$file};
 					delete $logrulesexpressions{$ruleshome}{$ruledir}{$file};
 				}
@@ -658,7 +659,7 @@ print STDERR "Remove old \"$ruleshome/$ruledir/$file\"\n";
 				if ( $file =~ /^\./ ) { next; }
 				if ( ! exists $logrulestimes{$ruleshome}{$ruledir}{$file}
 					or $logrulestimes{$ruleshome}{$ruledir}{$file} != -M "$ruleshome/$ruledir/$file" ) {
-print STDERR "Add/Update new \"$ruleshome/$ruledir/$file\"\n";
+#print STDERR "Add/Update new \"$ruleshome/$ruledir/$file\"\n";
 					# update rules TODO
 					open my $rules, '<', "$ruleshome/$ruledir/$file" or next;
 					my @rules;
@@ -835,7 +836,8 @@ sub sendlogreport {
 		}
 	}
 	if ( defined $cycletime ) {
-		print $mail "\nLast Cycle Time: $cycletime hours\n"
+		print $mail "\nLast Cycle Time: $cycletime hours\n";
+		print $mail "Speed Factor: $speedfactor\n";
 	}
 	close $mail;
 	$loglastreport = $now;
@@ -973,7 +975,8 @@ sub checkpids {
 		print $mail "PIDReports from $0 on $host:\n\n";
 		print $mail "$report\n";
 		if ( defined $cycletime ) {
-			print $mail "\nLast Cycle Time: $cycletime hours\n"
+			print $mail "\nLast Cycle Time: $cycletime hours\n";
+			print $mail "Speed Factor: $speedfactor\n";
 		}
 		close $mail;
 	}
@@ -981,6 +984,7 @@ sub checkpids {
 
 sub getpidstatus {
 	my ( $pid ) = @_;
+	if ( ! defined $pid ) { return undef; }
 	open my $st, '<', "/proc/$pid/status" or return undef;
 	my $state;
 	while ( defined ( my $line = <$st> ) ) {
@@ -1032,7 +1036,7 @@ sub findctpid {
 		}
 		close $st;
 	}
-	return undef;
+	return 0;	# none found
 }
 
 
