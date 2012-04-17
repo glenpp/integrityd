@@ -10,8 +10,8 @@
 #
 # Version:	@(#)skeleton  1.9  26-Feb-2001  miquels@cistron.nl
 #
-#               Further changes by Glen Pitt-Pladdy for Network Peak Monitoring Daemon
-#               http://www.pitt-pladdy.com/blog/_20111222-093052_0000_Peak_Network_Bandwidth_for_Cacti/
+#               Further changes by Glen Pitt-Pladdy for integrityd
+#               http://www.pitt-pladdy.com/blog/_20120407-220642_0000_Background_files_integrity_and_log_auditing_fcheck_logcheck_/
 #
 ### BEGIN INIT INFO
 # Provides:          integrityd
