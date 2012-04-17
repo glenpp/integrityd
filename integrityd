@@ -1,8 +1,10 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
-# TODO put pid files to monitor
 # use logcheck-database (debian)
+
+
+my $VERSION = 20120417;
 
 
 use DBI;
@@ -46,8 +48,8 @@ my $reporttime = 30;	# pool changes for this long before sending
 my $reportholdoff = 300;	# wait this long after a report before sending again
 my %areas;
 my %excludes;
-my $logchecktime = 30;	# how often to check logs TODO
-my $logruleupdate = 120;	# how often to update log rules TODO
+my $logchecktime = 30;
+my $logruleupdate = 120;
 my $logreporttime = 0;
 my $logreportholdoff = 0;
 my $logrules = '/etc/logcheck';
@@ -55,7 +57,7 @@ my %logfiles;
 my @logfiles;
 my $pidct = 100;
 my %pidfiles;	# CT and PID file
-my $pidchecktime = 30;	# how often to check PIDs TODO
+my $pidchecktime = 30;
 
 my %logrules;	# the rules areas we need to watch
 my %logrulestimes;	# times
@@ -83,6 +85,12 @@ if ( -f $CONFIG ) {
 				$speedup = $2;
 			} elsif ( $1 eq 'smallfiles' ) {
 				$smallfiles = $2;
+			} elsif ( $1 eq 'logchecktime' ) {
+				$logchecktime = $2;
+			} elsif ( $1 eq 'logruleupdate' ) {
+				$logruleupdate = $2;
+			} elsif ( $1 eq 'pidchecktime' ) {
+				$pidchecktime = $2;
 			} elsif ( $1 eq 'reporttime' ) {
 				$reporttime = $2;
 			} elsif ( $1 eq 'reportholdoff' ) {
@@ -164,8 +172,14 @@ $SIG{'HUP'} = 'exitclean';
 
 
 # get database up
-#my $dbh = DBI->connect ( "DBI:SQLite:dbname=$database",'','',{RaiseError=>+1,AutoCommit=>1} ) or die "Can't connect: ".$DBI::errstr;
-my $dbh = DBI->connect ( "DBI:SQLite:dbname=$database",'','',{RaiseError=>+1,AutoCommit=>0} ) or die "Can't connect: ".$DBI::errstr;
+my $dbh = DBI->connect ( "DBI:SQLite:dbname=$database",'','',{RaiseError=>+1,AutoCommit=>1} ) or die "Can't connect: ".$DBI::errstr;
+# these shave about 10-15% off
+$dbh->do ( 'PRAGMA cache_size = 100000' );
+$dbh->do ( 'PRAGMA synchronous = OFF' );
+$dbh->do ( 'PRAGMA temp_store = MEMORY' );
+$dbh->do ( 'PRAGMA count_changes = OFF' );
+$dbh->{AutoCommit} = 0;
+
 #$dbh->trace(2);
 # check state of database
 my $st = $dbh->prepare ( 'SELECT COUNT(*) FROM NodeInfo' );
@@ -313,23 +327,8 @@ while ( $run ) {
 			$reshuffle = 0;
 			$reshuffleat = rand() * 100;
 		}
-		# logcheck cycle
-		my $now = time();
-		if ( $now - $lastlogcheck >= $logchecktime ) {
-			if ( $now - $lastlogruleupdate >= $logruleupdate ) {
-				checklogrules ();
-				$lastlogruleupdate = $now;
-			}
-			checklogs ();
-			$lastlogcheck = $now;
-			# send reports
-			sendlogreport ();
-		}
-		# pidcheck cycle
-		if ( $now - $lastpidcheck >= $pidchecktime ) {
-			checkpids ();
-			$lastpidcheck = $now;
-		}
+		# run other cycles
+		cyclecheck ();
 
 		# send reports
 		sendreport ();
@@ -339,12 +338,18 @@ while ( $run ) {
 			$commitcount = 0;
 		}
 	}
-print STDERR "Reset emptydb / speedfactor: $emptydb / $speedfactor\n";
+	# run other cycles
+	cyclecheck ();
+	# send reports
+	sendreport ();
+	# sleep a bit to make sure we don't hog resource if we are not checking files
+	sleep 1;
+#print STDERR "Reset emptydb / speedfactor: $emptydb / $speedfactor\n";
 	$emptydb = 0;
 	$speedfactor = 1;
 	# find cycle time
 	$cycletime = int ( ( gettimeofday () - $runtime ) / 360 ) / 10;
-print STDERR "Cycle: $cycletime\n\n";
+#print STDERR "Cycle: $cycletime\n\n";
 #exit 0;
 }
 
@@ -358,13 +363,33 @@ checklogs ();
 $loglastreport = 0;
 $logoldestreport = 1;
 sendlogreport ();
-# TODO report our exit
 # clean up transactions
 $dbh->commit();
 # remove PID
 if ( $DAEMON ) { unlink $PIDFILE; }
 
 
+
+# check other scheduled tasks
+sub cyclecheck {
+	my $now = time();
+	# logcheck cycle
+	if ( $now - $lastlogcheck >= $logchecktime ) {
+		if ( $now - $lastlogruleupdate >= $logruleupdate ) {
+			checklogrules ();
+			$lastlogruleupdate = $now;
+		}
+		checklogs ();
+		$lastlogcheck = $now;
+		# send reports
+		sendlogreport ();
+	}
+	# pidcheck cycle
+	if ( $now - $lastpidcheck >= $pidchecktime ) {
+		checkpids ();
+		$lastpidcheck = $now;
+	}
+}
 
 
 
@@ -619,7 +644,9 @@ sub sendreport {
 		print $mail $$result{$id}{'Notes'}."\n";
 	}
 	if ( defined $cycletime ) {
-		print $mail "\nLast Cycle Time: $cycletime hours\n";
+		print $mail "\n";
+		print $mail "Version: $VERSION\n";
+		print $mail "Last Cycle Time: $cycletime hours\n";
 		print $mail "Speed Factor: $speedfactor\n";
 	}
 	close $mail;
@@ -836,7 +863,9 @@ sub sendlogreport {
 		}
 	}
 	if ( defined $cycletime ) {
-		print $mail "\nLast Cycle Time: $cycletime hours\n";
+		print $mail "\n";
+		print $mail "Version: $VERSION\n";
+		print $mail "Last Cycle Time: $cycletime hours\n";
 		print $mail "Speed Factor: $speedfactor\n";
 	}
 	close $mail;
@@ -988,7 +1017,7 @@ sub getpidstatus {
 	open my $st, '<', "/proc/$pid/status" or return undef;
 	my $state;
 	while ( defined ( my $line = <$st> ) ) {
-		if ( $line =~ /State:\s*(\w)\s+\(\w+\)$/ ) {
+		if ( $line =~ /^State:\s*(\w)\s+\([\w\s]+\)$/ ) {
 			$state = $1;
 			last;
 		}

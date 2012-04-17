@@ -34,7 +34,7 @@ test -x $DAEMON || exit 0
 
 LOGDIR=/var/log/integrityd
 PIDFILE=/var/run/$NAME.pid
-DODTIME=1                   # Time to wait for the server to die, in seconds
+DODTIME=3                   # Time to wait for the server to die, in seconds
                             # If this value is set too low you might not
                             # let some servers to die gracefully and
                             # 'restart' will not work
