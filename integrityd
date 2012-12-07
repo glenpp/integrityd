@@ -24,10 +24,10 @@ use warnings;
 # use with logcheck-database (debian)
 
 
-my $VERSION = 20120417;
+my $VERSION = 20121207;
 
 
-use DBI;
+use DBI;	# TODO only if filesystem checks are enabled TODO
 use Digest::SHA1;
 use Time::HiRes qw(usleep gettimeofday);
 use List::Util qw(shuffle);
@@ -72,16 +72,27 @@ my $logchecktime = 30;
 my $logruleupdate = 120;
 my $logreporttime = 0;
 my $logreportholdoff = 0;
-my $logrules = '/etc/logcheck';
+my $logrules = '/etc/logcheck';	# applies to subsequent "log" entries
 my %logfiles;
 my @logfiles;
-my $pidct = 100;
+my $pidct = 100;		# applies to subsequent "pidfile" entries
 my %pidfiles;	# CT and PID file
 my $pidchecktime = 30;
 
 my %logrules;	# the rules areas we need to watch
 my %logrulestimes;	# times
 my %logrulesexpressions;	# rules for each area
+
+# Nagios passive check info
+my $nagioscmd;			# nagios reporting disabled if this is not set
+my $nagioshost = '';	# applies to subsequent checks - if empty no reporting is done
+my $nagiosdescription;	# applies to subsequent checks - defaults to filecheck|logcheck|pidcheck
+my %areashost;
+my %areasdescription;
+my %logshost;
+my %logsdescription;
+my %pidshost;
+my %pidsdescription;
 
 
 # Read in the config
@@ -119,10 +130,19 @@ if ( -f $CONFIG ) {
 				$logreporttime = $2;
 			} elsif ( $1 eq 'logreportholdoff' ) {
 				$logreportholdoff = $2;
+			} elsif ( $1 eq 'nagioscmd' ) {
+				$nagioscmd = $1;
+			} elsif ( $1 eq 'nagioshost' ) {
+				$nagioshost = $1;
+			} elsif ( $1 eq 'nagiosdescription' ) {
+				$nagiosdescription = $1;
 			} elsif ( $1 eq 'area' ) {
 				my $path = $2;
 				$path =~ s/(.)\/$/$1/;	# strip trailing /
 				$areas{$path} = 1;
+				# nagios parameters
+				if ( $nagioshost ne '' ) { $areasnagioshost{$path} = $nagioshost; }
+				$areasnagiosdescription{$path} = (defined $nagiosdescription and $nagiosdescription ne '')?$nagioshost:'filecheck';
 			} elsif ( $1 eq 'exclude' ) {
 				$excludes{$2} = 1;
 			} elsif ( $1 eq 'logrules' ) {
@@ -131,8 +151,14 @@ if ( -f $CONFIG ) {
 				$logfiles{$2} = $logrules;
 				push @logfiles, $2;
 				$logrules{$logrules} = 1;
+				# nagios parameters
+				if ( $nagioshost ne '' ) { $logsnagioshost{$path} = $nagioshost; }
+				$logsnagiosdescription{$path} = (defined $nagiosdescription and $nagiosdescription ne '')?$nagioshost:'logcheck';
 			} elsif ( $1 eq 'pidfile' ) {
 				$pidfiles{$pidct}{$2} = 1;
+				# nagios parameters
+				if ( $nagioshost ne '' ) { $logsnagioshost{$path} = $nagioshost; }
+				$pidsnagiosdescription{$path} = (defined $nagiosdescription and $nagiosdescription ne '')?$nagioshost:'pidcheck';
 			} elsif ( $1 eq 'pidct' ) {
 				$pidct = $2;
 			} else {
@@ -191,7 +217,7 @@ $SIG{'INT'} = 'exitclean';
 $SIG{'HUP'} = 'exitclean';
 
 
-# get database up
+# get database up TODO use and enable this on demand TODO
 my $dbh = DBI->connect ( "DBI:SQLite:dbname=$database",'','',{RaiseError=>+1,AutoCommit=>1} ) or die "Can't connect: ".$DBI::errstr;
 # these shave about 10-15% off
 $dbh->do ( 'PRAGMA cache_size = 100000' );
