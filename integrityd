@@ -87,12 +87,12 @@ my %logrulesexpressions;	# rules for each area
 my $nagioscmd;			# nagios reporting disabled if this is not set
 my $nagioshost = '';	# applies to subsequent checks - if empty no reporting is done
 my $nagiosdescription;	# applies to subsequent checks - defaults to filecheck|logcheck|pidcheck
-my %areashost;
-my %areasdescription;
-my %logshost;
-my %logsdescription;
-my %pidshost;
-my %pidsdescription;
+my %areasnagioshost;
+my %areasnagiosdescription;
+my %logsnagioshost;
+my %logsnagiosdescription;
+my %pidsnagioshost;
+my %pidsnagiosdescription;
 
 
 # Read in the config
@@ -152,13 +152,13 @@ if ( -f $CONFIG ) {
 				push @logfiles, $2;
 				$logrules{$logrules} = 1;
 				# nagios parameters
-				if ( $nagioshost ne '' ) { $logsnagioshost{$path} = $nagioshost; }
-				$logsnagiosdescription{$path} = (defined $nagiosdescription and $nagiosdescription ne '')?$nagioshost:'logcheck';
+				if ( $nagioshost ne '' ) { $logsnagioshost{$2} = $nagioshost; }
+				$logsnagiosdescription{$2} = (defined $nagiosdescription and $nagiosdescription ne '')?$nagioshost:'logcheck';
 			} elsif ( $1 eq 'pidfile' ) {
 				$pidfiles{$pidct}{$2} = 1;
 				# nagios parameters
-				if ( $nagioshost ne '' ) { $logsnagioshost{$path} = $nagioshost; }
-				$pidsnagiosdescription{$path} = (defined $nagiosdescription and $nagiosdescription ne '')?$nagioshost:'pidcheck';
+				if ( $nagioshost ne '' ) { $logsnagioshost{$2} = $nagioshost; }
+				$pidsnagiosdescription{$2} = (defined $nagiosdescription and $nagiosdescription ne '')?$nagioshost:'pidcheck';
 			} elsif ( $1 eq 'pidct' ) {
 				$pidct = $2;
 			} else {
