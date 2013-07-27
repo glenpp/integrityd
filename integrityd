@@ -24,11 +24,11 @@ use warnings;
 # use with logcheck-database (debian)
 
 
-my $VERSION = 20121207;
+my $VERSION = 20130707;
 
 
 use DBI;	# TODO only if filesystem checks are enabled TODO
-use Digest::SHA1;
+use Digest::HMAC_SHA1;
 use Time::HiRes qw(usleep gettimeofday);
 use List::Util qw(shuffle);
 use Sys::Hostname;
@@ -58,7 +58,7 @@ my $TRANSACTIONPOOL = 100;	# wrap files in a transaction at this rate
 
 
 my $CONFIG = '/etc/integrityd.conf';
-my $email = 'root@localhost';
+my $email = 'root@localhost';	# TODO if this is set to '' or NULL then no email alerting TODO
 my $database = '/var/lib/integrityd/integrityd.sqlite';
 my $byterate = 1048576;    # Bytes / second
 my $filerate = 1;    # Files / second
@@ -85,6 +85,8 @@ my %logrulesexpressions;	# rules for each area
 
 # Nagios passive check info
 my $nagioscmd;			# nagios reporting disabled if this is not set
+my $nagiosexpire = 900;	# alert for 15 minutes by default
+my $nagiosping = 30;	# how often to ping Nagios
 my $nagioshost = '';	# applies to subsequent checks - if empty no reporting is done
 my $nagiosdescription;	# applies to subsequent checks - defaults to filecheck|logcheck|pidcheck
 my %areasnagioshost;
@@ -132,6 +134,10 @@ if ( -f $CONFIG ) {
 				$logreportholdoff = $2;
 			} elsif ( $1 eq 'nagioscmd' ) {
 				$nagioscmd = $1;
+			} elsif ( $1 eq 'nagiosexpire' ) {
+				$nagiosexpire = $1;
+			} elsif ( $1 eq 'nagiosping' ) {
+				$nagiosping = $1;
 			} elsif ( $1 eq 'nagioshost' ) {
 				$nagioshost = $1;
 			} elsif ( $1 eq 'nagiosdescription' ) {
@@ -283,7 +289,7 @@ checklogrules ();
 # flush any reports
 my $lastreport = 0;	# most recent report
 my $oldestreport = 1;
-sendreport ();
+sendfilereport ();
 $lastreport = 0;	# reset to start
 my $loglastreport = 0;	# most recent report
 my $logoldestreport = 1;
@@ -377,7 +383,7 @@ while ( $run ) {
 		cyclecheck ();
 
 		# send reports
-		sendreport ();
+		sendfilereport ();
 		# commit to database if needed
 		if ( $commitcount++ >= $TRANSACTIONPOOL ) {
 			$dbh->commit();
@@ -387,7 +393,7 @@ while ( $run ) {
 	# run other cycles
 	cyclecheck ();
 	# send reports
-	sendreport ();
+	sendfilereport ();
 	# sleep a bit to make sure we don't hog resource if we are not checking files
 	sleep 1;
 #print STDERR "Reset emptydb / speedfactor: $emptydb / $speedfactor\n";
@@ -403,7 +409,7 @@ syslog 'info', 'Exiting';
 # cleanup reports as we exit
 $lastreport = 0;
 $oldestreport = 1;
-sendreport ();
+sendfilereport ();
 # one final log check and cleanup reports as we exit
 checklogs ();
 $loglastreport = 0;
@@ -473,7 +479,7 @@ sub checknode {
 			syslog 'err', "ERROR - can't read file \"$path\": $!";
 		} else {
 			my $buffer = '';
-			my $sha1 = Digest::SHA1->new;
+			my $sha1 = Digest::HMAC_SHA1->new;
 			my $starttime = gettimeofday ();
 			my $totalsize = 0;
 			# advise kernel on file access patterns to avoid wasted caching
@@ -546,7 +552,7 @@ sub checknode {
 					) {
 					# file changed
 					$speedfactor = $speedup;	# changes - speedup
-					report ( $path, 'Changed', $result, \%fields );
+					reportfile ( $path, 'Changed', $result, \%fields );
 					# update database
 					my $cols = 'LastChecked = ?';
 					my @params = ( time() );
@@ -568,7 +574,7 @@ sub checknode {
 #syslog 'warning', "DB DELETE - tried to check non-existant node \"$path\"";
 			# nothing there - node vanished
 			$speedfactor = $speedup;	# changes - speedup
-			report ( $path, 'Deleted', $result, undef );
+			reportfile ( $path, 'Deleted', $result, undef );
 			# update database
 #print STDERR ">>$path\n";
 #print STDERR "DELETE FROM NodeInfo WHERE id = ?\n";
@@ -583,7 +589,7 @@ sub checknode {
 		if ( %fields ) {
 			# new node
 			$speedfactor = $speedup;	# changes - speedup
-			report ( $path, 'New', undef, \%fields );
+			reportfile ( $path, 'New', undef, \%fields );
 			# add to database
 			my $cols = 'Path,LastChecked';
 			my $values = '?,?';
@@ -606,7 +612,7 @@ sub checknode {
 }
 
 
-sub report {
+sub reportfile {
 	my ( $path, $event, $before, $after ) = @_;
 	if ( $emptydb ) { return; }	# skip on first run
 	my $notes = "$event: $path\n";
@@ -662,7 +668,7 @@ sub report {
 }
 
 
-sub sendreport {
+sub sendfilereport {
 	if ( time() - $lastreport < $reportholdoff
 		or $oldestreport == 0
 		or time() - $oldestreport < $reporttime ) { return; }
