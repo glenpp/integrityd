@@ -18,13 +18,13 @@ use warnings;
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #
 #
-# See: http://www.pitt-pladdy.com/blog/_20120407-220642_0000_Background_files_integrity_and_log_auditing_fcheck_logcheck_/
+# See: https://www.pitt-pladdy.com/blog/_20120407-220642_0000_Background_files_integrity_and_log_auditing_fcheck_logcheck_/
 
 
 # use with logcheck-database (debian)
 
 
-my $VERSION = 20130707;
+my $VERSION = 20140314;
 
 
 use DBI;	# TODO only if filesystem checks are enabled TODO
@@ -43,8 +43,8 @@ use IO::AIO;	# debian: libio-aio-perl - need wheezy or later
 # get logging online
 my $logname = $0;
 $logname =~ s/^.*\///;
-openlog $logname, 'ndelay,pid', 'local0';
-syslog 'info', 'Starting up with arguments: '.join(' ',@ARGV);
+openlog ( $logname, 'ndelay,pid', 'local0' );
+syslog ( 'info', 'Starting up with arguments: '.join(' ',@ARGV) );
 
 
 # set command / arguments
@@ -63,7 +63,8 @@ my $database = '/var/lib/integrityd/integrityd.sqlite';
 my $byterate = 1048576;    # Bytes / second
 my $filerate = 1;    # Files / second
 my $speedup = 20;	# speed up when changes / emptydb
-my $smallfiles = 131072;	# don't delay on files smaller than this
+my $smallfiles = 131072;	# don't trickle reading files smaller than this for checksums
+my $filechangeaction;	# TODO run this commnad (none by default) on every changed file TODO with environment describing the change
 my $reporttime = 30;	# pool changes for this long before sending
 my $reportholdoff = 300;	# wait this long after a report before sending again
 my %areas;
@@ -118,6 +119,11 @@ if ( -f $CONFIG ) {
 				$speedup = $2;
 			} elsif ( $1 eq 'smallfiles' ) {
 				$smallfiles = $2;
+			} elsif ( $1 eq 'filechangeaction' ) {
+				$filechangeaction = $2;
+				if ( ! -x $filechangeaction ) {
+					die "$0: can't execute 'filechangeaction': $$filechangeaction\n";
+				}
 			} elsif ( $1 eq 'logchecktime' ) {
 				$logchecktime = $2;
 			} elsif ( $1 eq 'logruleupdate' ) {
@@ -240,7 +246,7 @@ my $result = $st->fetchrow_hashref ();
 if ( $$result{'COUNT(*)'} == 0 ) {
 	$emptydb = 1;
 	$speedfactor = $speedup;
-	syslog 'info', 'Empty database found - skipping reporting and old node checks unil database is populated';
+	syslog ( 'info', 'Empty database found - skipping reporting and old node checks unil database is populated' );
 }
 
 # make sure entries are in database for current log files
@@ -398,7 +404,7 @@ while ( $run ) {
 	sleep 1;
 #print STDERR "Reset emptydb / speedfactor: $emptydb / $speedfactor\n";
 	$emptydb = 0;
-	$speedfactor = 1;
+	$speedfactor = 1;	# TODO this should be based on completing a run 100% clean (no changes) TODO
 	# find cycle time
 	$cycletime = int ( ( gettimeofday () - $runtime ) / 360 ) / 10;
 #print STDERR "Cycle: $cycletime\n\n";
@@ -445,7 +451,7 @@ sub cyclecheck {
 
 
 
-
+# check a filesystem node (path) against what is in the database
 sub checknode {
 	my ( $path ) = @_;
 #print "\n------------\nProcessing $path\n";
@@ -492,6 +498,7 @@ sub checknode {
 				}
 			} else {
 #print STDERR "slowread\n";
+				# slow read - pace ourselves so we don't overload the system
 				while ( ( my $read = read $file, $buffer, 4096 ) > 0 ) {
 					$sha1->add ( $buffer );
 					$totalsize += $read;
@@ -553,6 +560,7 @@ sub checknode {
 					# file changed
 					$speedfactor = $speedup;	# changes - speedup
 					reportfile ( $path, 'Changed', $result, \%fields );
+					filechangeaction ( $path, 'Changed', $result, \%fields );
 					# update database
 					my $cols = 'LastChecked = ?';
 					my @params = ( time() );
@@ -575,6 +583,7 @@ sub checknode {
 			# nothing there - node vanished
 			$speedfactor = $speedup;	# changes - speedup
 			reportfile ( $path, 'Deleted', $result, undef );
+			filechangeaction ( $path, 'Deleted', $result, undef );
 			# update database
 #print STDERR ">>$path\n";
 #print STDERR "DELETE FROM NodeInfo WHERE id = ?\n";
@@ -590,6 +599,7 @@ sub checknode {
 			# new node
 			$speedfactor = $speedup;	# changes - speedup
 			reportfile ( $path, 'New', undef, \%fields );
+			filechangeaction ( $path, 'New', undef, \%fields );
 			# add to database
 			my $cols = 'Path,LastChecked';
 			my $values = '?,?';
@@ -612,6 +622,7 @@ sub checknode {
 }
 
 
+# insert a report row baed on the changes to the file
 sub reportfile {
 	my ( $path, $event, $before, $after ) = @_;
 	if ( $emptydb ) { return; }	# skip on first run
@@ -665,6 +676,39 @@ sub reportfile {
 	$st->execute ( $path, $notes, time() );
 	$dbh->commit();
 	if ( $oldestreport == 0 ) { $oldestreport = time(); }
+}
+
+
+# launch the $filechangeaction on the file with changes to the file in the environment TODO
+sub filechangeaction {
+	my ( $path, $event, $before, $after ) = @_;
+	if ( ! defined ( $filechangeaction ) ) { return 0; }
+	my %oldenv = %ENV;
+	$ENV{integrityd_event} = $event;
+	if ( defined $before ) {
+		foreach my $field (sort keys %$before) {
+			my $prev = '';
+			my $post = '';
+			if ( defined $$before{$field} ) {
+				$ENV{"integrityd_${field}_before"} = $$before{$field};
+				$prev = $$before{$field};
+			}
+			if ( defined $$after{$field} ) {
+				$ENV{"integrityd_${field}_after"} = $$after{$field};
+				$post = $$after{$field};
+			}
+			if ( $prev ne $post ) {
+				$ENV{"integrityd_${field}_status"} = 'CHANGE';
+			}
+		}
+	} elsif ( defined $after ) {
+		foreach (sort keys %$after ) {
+			if ( ! defined $$after{$_} ) { next; }
+			$ENV{"integrityd_${_}_after"} = $$after{$_};
+		}
+	}
+	system ( $filechangeaction, $path );
+	# TODO check status and lot if bad TODO
 }
 
 
