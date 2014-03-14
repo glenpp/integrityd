@@ -316,10 +316,12 @@ while ( $run ) {
 	my $reshuffle = 0;
 	my $reshuffleat = rand() * 100;
 	my @searchstack;
+	my $filechangecount = 0;
 	# put initial listings in to help mix it up
 	foreach (keys %areas) {
 		push @searchstack, glob "$_/*";
-		checknode ( $_ );
+		my ( $changed, $size ) = checknode ( $_ );
+		$filechangecount += $changed;
 	}
 	@searchstack = shuffle @searchstack;
 	# search this area
@@ -327,7 +329,8 @@ while ( $run ) {
 		my $node = pop @searchstack;
 		if ( defined $excludes{$node} ) { next; }
 		# process this node
-		my $size = checknode ( $node );
+		my ( $changed, $size ) = checknode ( $node );
+		$filechangecount += $changed;
 		# add more if needed
 		if ( -d $node and ! -l $node ) {
 			push @searchstack, glob "$node/*";
@@ -369,7 +372,8 @@ while ( $run ) {
 					$st->execute ( $$result{'Path'} );
 #print STDERR "\n\n\n************** DELETED $$result{Path} ******************\n\n\n\n";
 				} else {
-					$size = checknode ( $$result{'Path'} );
+					my ( $changed, $size ) = checknode ( $node );
+					$filechangecount += $changed;
 				}
 			}
 			# do delay
@@ -404,7 +408,7 @@ while ( $run ) {
 	sleep 1;
 #print STDERR "Reset emptydb / speedfactor: $emptydb / $speedfactor\n";
 	$emptydb = 0;
-	$speedfactor = 1;	# TODO this should be based on completing a run 100% clean (no changes) TODO
+	if ( $filechangecount == 0 ) { $speedfactor = 1; }	# this should be based on completing a run 100% clean (no changes)
 	# find cycle time
 	$cycletime = int ( ( gettimeofday () - $runtime ) / 360 ) / 10;
 #print STDERR "Cycle: $cycletime\n\n";
@@ -478,6 +482,7 @@ sub checknode {
 		$fields{'Type'} = 'Symlink';	# overridden by type
 	}
 	my $size = 0;
+	my $changed = 0;
 	if ( -f $path ) {
 		$size = $stat[7];
 		# file
@@ -559,6 +564,7 @@ sub checknode {
 					) {
 					# file changed
 					$speedfactor = $speedup;	# changes - speedup
+					++$changed;
 					reportfile ( $path, 'Changed', $result, \%fields );
 					filechangeaction ( $path, 'Changed', $result, \%fields );
 					# update database
@@ -582,6 +588,7 @@ sub checknode {
 #syslog 'warning', "DB DELETE - tried to check non-existant node \"$path\"";
 			# nothing there - node vanished
 			$speedfactor = $speedup;	# changes - speedup
+			++$changed;
 			reportfile ( $path, 'Deleted', $result, undef );
 			filechangeaction ( $path, 'Deleted', $result, undef );
 			# update database
@@ -598,6 +605,7 @@ sub checknode {
 		if ( %fields ) {
 			# new node
 			$speedfactor = $speedup;	# changes - speedup
+			++$changed;
 			reportfile ( $path, 'New', undef, \%fields );
 			filechangeaction ( $path, 'New', undef, \%fields );
 			# add to database
@@ -618,7 +626,7 @@ sub checknode {
 		}
 	}
 	# all done
-	return $size;
+	return ( $changed, $size );
 }
 
 
