@@ -188,10 +188,9 @@ if ( $logreportholdoff == 0 ) { $logreportholdoff = $reportholdoff; }
 
 # check our state
 my $emptydb = 0;
-my $speedfactor = 1;
+my $speedfactor = $speedup;	# always start at max speed
 if ( defined $ARGV[0] and $ARGV[0] eq '--emptydb' ) {
 	$emptydb = 1;
-	$speedfactor = $speedup;
 	syslog 'info', 'Started in empty database mode - skipping reporting and old node checks unil database is populated';
 }
 
