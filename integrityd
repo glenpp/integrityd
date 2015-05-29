@@ -24,7 +24,7 @@ use warnings;
 # use with logcheck-database (debian)
 
 
-my $VERSION = 20150405;
+my $VERSION = 20150429;
 
 
 use DBI;	# TODO only if filesystem checks are enabled TODO
@@ -854,18 +854,20 @@ sub checklog {
 	while ( defined ( my $line = <$log> ) ) {
 		if ( $line =~ /\n$/ ) {
 			chomp $line;
+			my $cleanline = $line;	# clean up the line for comparisons
+			$cleanline =~ s/message repeated \d+ times: \[ (.*)\]$/$1/;	# remove repeat notices
 			$position = tell $log;
 			# process the log against the rules
 			my $in = 0;
 			CR: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{'cracking.d'}}) {
 				foreach my $rule (@{$logrulesexpressions{$ruleshome}{'cracking.d'}{$rulesfile}}) {
-					if ( $line =~ /$rule/ ) { $in = 1; last CR; }
+					if ( $cleanline =~ /$rule/ ) { $in = 1; last CR; }
 				}
 			}
 			if ( $in ) {
 				CRI: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{'cracking.ignore.d'}}) {
 					foreach my $rule (@{$logrulesexpressions{$ruleshome}{'cracking.ignore.d'}{$rulesfile}}) {
-						if ( $line =~ /$rule/ ) { $in = 0; last CRI; }
+						if ( $cleanline =~ /$rule/ ) { $in = 0; last CRI; }
 					}
 				}
 			}
@@ -878,13 +880,13 @@ sub checklog {
 			}
 			VR: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{'violations.d'}}) {
 				foreach my $rule (@{$logrulesexpressions{$ruleshome}{'violations.d'}{$rulesfile}}) {
-					if ( $line =~ /$rule/ ) { $in = 1; last VR; }
+					if ( $cleanline =~ /$rule/ ) { $in = 1; last VR; }
 				}
 			}
 			if ( $in ) {
 				VRI: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{'violations.ignore.d'}}) {
 					foreach my $rule (@{$logrulesexpressions{$ruleshome}{'violations.ignore.d'}{$rulesfile}}) {
-						if ( $line =~ /$rule/ ) { $in = 0; last VRI; }
+						if ( $cleanline =~ /$rule/ ) { $in = 0; last VRI; }
 					}
 				}
 			}
@@ -899,7 +901,7 @@ sub checklog {
 			$in = 1;
 			IR: foreach my $rulesfile (keys %{$logrulesexpressions{$ruleshome}{$ignorerule}}) {
 				foreach my $rule (@{$logrulesexpressions{$ruleshome}{$ignorerule}{$rulesfile}}) {
-					if ( $line =~ /$rule/ ) { $in = 0; last IR; }
+					if ( $cleanline =~ /$rule/ ) { $in = 0; last IR; }
 				}
 			}
 			if ( $in ) {
