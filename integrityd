@@ -24,7 +24,7 @@ use warnings;
 # use with logcheck-database (debian)
 
 
-my $VERSION = 20140314;
+my $VERSION = 20150405;
 
 
 use DBI;	# TODO only if filesystem checks are enabled TODO
@@ -50,6 +50,8 @@ syslog ( 'info', 'Starting up with arguments: '.join(' ',@ARGV) );
 # set command / arguments
 $0 = __FILE__.' '.join(' ',@ARGV);
 
+# run loop until this changes
+my $run = 1;
 
 my $DAEMON = 1;
 my $PIDFILE = '/var/run/integrityd.pid';
@@ -229,7 +231,17 @@ $SIG{'HUP'} = 'exitclean';
 
 
 # get database up TODO use and enable this on demand TODO
-my $dbh = DBI->connect ( "DBI:SQLite:dbname=$database",'','',{RaiseError=>+1,AutoCommit=>1} ) or die "Can't connect: ".$DBI::errstr;
+my $dbh = DBI->connect (
+		"DBI:SQLite:dbname=$database",'','',
+		{
+#			RaiseError => +1,	# raises an exception
+			HandleError => sub {
+				syslog ( 'err', $_[0] );
+				$run = 0;
+			},
+			AutoCommit => 1,
+		}
+	) or die "Can't connect: ".$DBI::errstr;
 # these shave about 10-15% off
 $dbh->do ( 'PRAGMA cache_size = 100000' );
 $dbh->do ( 'PRAGMA synchronous = OFF' );
@@ -303,7 +315,6 @@ $loglastreport = 0;	# reset to start
 
 
 # main loop
-my $run = 1;
 my $lastlogruleupdate = $^T;
 my $lastlogcheck = $^T - $logchecktime;
 my $lastpidcheck = $^T - $pidchecktime;
