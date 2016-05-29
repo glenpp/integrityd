@@ -7,6 +7,8 @@ import yaml
 import sqlite3
 import time
 import re
+import subprocess
+import socket
 
 
 
@@ -74,6 +76,19 @@ class timer:
 		return False
 	def ramaining ( self ):
 		return self.next - time.time ()
+
+# mailer
+hostname = socket.gethostname()	# used for subjects etc.
+def mail ( subject, lines ):
+	global config
+	print "sending mail"
+	mail = subprocess.Popen ( [ config['common']['mailcommand'], '-s', subject, config['common']['email'] ], stdin=subprocess.PIPE )
+	out,err = mail.communicate ( "\n".join(lines) )
+	ret = mail.returncode
+	print out
+	print err
+	print ret
+	print
 
 
 
@@ -143,7 +158,7 @@ class logrules:
 					if path not in self.dirstate:
 						self.dirstate[path] = 0.0	# set zero start time to force files to be checked
 		# now update (read) all the rules for the first time
-		self.rulesupdate ()
+		self.rulesupdate ( True )
 		# read LogPosition from database, cleanup unconfigured logs from database
 		cleanup = []
 		dbcur.execute ( 'SELECT * FROM LogPosition' )
@@ -158,7 +173,7 @@ class logrules:
 				dbcur.execute ( 'DELETE FROM LogPosition WHERE id = ?', [ rowid ] )
 			db.commit ()
 		# trigger mailing cycle - flush whatever is already in the database
-		# TODO put a startup message in here from __HOST__ and don't need to check for messages then TODO
+		self._special ( '%s starting up' % sys.argv[0] )
 		dbcur.execute ( 'SELECT COUNT(*) FROM LogReport' )
 		if dbcur.fetchone()['COUNT(*)'] > 0: self._send ()
 
@@ -175,23 +190,27 @@ class logrules:
 			self.rules[path][item] = rules
 
 	# run through rules directories updating them
-	def rulesupdate ( self ):
-		# TODO log each of these as a host log item TODO
+	def rulesupdate ( self, startup=False ):
 		# we need to check all paths for updates
 		for path in self.dirstate:
 			if path not in self.rules: self.rules[path] = {}
+			mtime = os.path.getmtime ( path )
+			if self.dirstate[path] == mtime: continue	# nothing in the directory has changed
 			for item in os.listdir ( path ):
 				if os.path.isfile ( os.path.join ( path, item ) ):
-					if os.path.getmtime ( os.path.join ( path, item ) ) >= self.dirstate[path] or path not in self.rules or item not in self.rules[path]:
+					if os.path.getmtime ( os.path.join ( path, item ) ) >= self.dirstate[path] or item not in self.rules[path]:
 						# we need to read in this file
 						self._readrules ( path, item )
+						if not startup: self._special ( 'New/Updated rule file: %s' % os.path.join(path,item) )	# inform
+			self.dirstate[path] = mtime
 			# check and prune non-existing files
 			filesgone = []
 			for item in self.rules[path]:
 				if not os.path.isfile ( os.path.join ( path, item ) ):
 					filesgone.append ( item )
+					if not startup: self._special ( 'Removed rule file: %s' % os.path.join(path,item) )	# inform
 			for item in filesgone:
-				print 'delete: %s' % os.path.join ( path, item )
+				del  self.dirstate[path]
 				del self.rules[path][item]
 
 	# read a log file
@@ -260,7 +279,7 @@ class logrules:
 		report = {
 				'cracking': {},
 				'violations': {},
-				'logs': {},
+				'normal': {},
 			}
 		if host not in self.logpositions: self.logpositions[host] = {}
 		for logfile in self.logfiles[host]:
@@ -284,8 +303,8 @@ class logrules:
 			for path in self.hosts[host]['ignore']:
 				for rules in self.rules[path].values():
 					ignoring.extend ( rules )
-			report['logs'][logfile] = []
-			report['logs'][logfile].extend ( self._matchinglines ( ignoring, lines, False ) )
+			report['normal'][logfile] = []
+			report['normal'][logfile].extend ( self._matchinglines ( ignoring, lines, False ) )
 		# commit to database
 		newlines = []
 		timenow = int(time.time())
@@ -307,6 +326,12 @@ class logrules:
 				self.logpositions[host][logfile][2] = False
 		if changed: db.commit ()
 
+	# log a special message
+	def _special ( self, message ):
+		global dbcur
+		dbcur.execute ( 'INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', ['__HOST__','--SPECIAL--',message,'special',int(time.time())] )
+		db.commit ()
+
 	# check all the logs in the config
 	def checkalllogs ( self ):
 		for host in self.logfiles:
@@ -322,10 +347,10 @@ class logrules:
 		# check if we need to mail out
 		mustsend = False
 		# query database for number of non-standard logs - immediate send
-		dbcur.execute ( 'SELECT COUNT(*) FROM LogReport WHERE Priority != \'logs\'' )
+		dbcur.execute ( 'SELECT COUNT(*) FROM LogReport WHERE Priority != \'normal\'' )
 		if dbcur.fetchone()['COUNT(*)'] > 0: mustsend = True
-		# query database of oldest standard (logs) message - if it trips the timer then ssend unless in holdoff
-		dbcur.execute ( 'SELECT MIN(Time) FROM LogReport WHERE Priority = \'logs\'' )
+		# query database of oldest standard (normal) message - if it trips the timer then ssend unless in holdoff
+		dbcur.execute ( 'SELECT MIN(Time) FROM LogReport WHERE Priority = \'normal\'' )
 		oldest = dbcur.fetchone()['MIN(Time)']
 		timenow = int(time.time())
 		if oldest != None and timenow >= oldest + config['common']['reporttime'] and timenow >= self.holdofftime:
@@ -341,9 +366,8 @@ class logrules:
 		# TODO
 		messagelines = []
 		logfile = None
-		sententries = []
 		# query in order of priority, then host
-		for priority in ['cracking','violations','logs']:
+		for priority in ['special','cracking','violations','normal']:
 			for host in self.hostorder:
 				dbcur.execute ( 'SELECT * FROM LogReport WHERE Priority = ? AND Host = ? ORDER BY LogFile,Time', [ priority, host ] )
 				for row in dbcur:
@@ -353,16 +377,18 @@ class logrules:
 						messagelines.append ( '=' * len("%s :: %s" % (priority,row['LogFile'])) )
 						logfile = row['LogFile']
 					messagelines.append ( row['Line'] )
-					sententries.append ( row['id'] )
-		print "\n".join(messagelines)
-		# TODO send these
-		# nuke used lines
-		for rowid in sententries:
-			dbcur.execute ( 'DELETE FROM LogReport WHERE id = ?', [rowid] )
+		# prepend context
+		messagelines.insert ( 0, '' )
+		messagelines.insert ( 0, 'LogReports from %s on %s:' % (sys.argv[0],hostname) )
+		# TODO put in cycletime at end TODO maybe actually in mail() function
+		# send these
+		mail ( 'Log Report for %s' % hostname, messagelines )
+		# nuke these entries
+		dbcur.execute ( 'DELETE FROM LogReport' )
 		db.commit ()
 		# on send set holdoff timer
 		self.holdofftime = int(time.time()) + config['common']['reportholdoff']
-		
+
 
 
 
