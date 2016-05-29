@@ -185,7 +185,21 @@ class logrules:
 			rules = []
 			for line in lines:	# identify comments and blanks
 				if line == '' or line[0] == '#': continue
-				rules.append ( re.compile ( line ) )
+				# TODO this is a very crude change over for translating perl/grep into python TODO
+				pyline = line
+				pyline = re.sub ( r'\[:alnum:\]', 'a-zA-Z0-9', pyline )
+				pyline = re.sub ( r'\[:alpha:\]', 'a-zA-Z', pyline )
+				pyline = re.sub ( r'\[:digit:\]', '0-9', pyline )
+				pyline = re.sub ( r'\[:lower:\]', 'a-z', pyline )
+				pyline = re.sub ( r'\[:space:\]', r'\s', pyline )
+				pyline = re.sub ( r'\[:upper:\]', 'A-Z', pyline )
+				pyline = re.sub ( r'\[:xdigit:\]', '0-9a-fA-F', pyline )
+#				if pyline != line:
+#					print
+#					print line
+#					print pyline
+				# generate the compiled expression
+				rules.append ( re.compile ( pyline ) )
 			# all done
 			self.rules[path][item] = rules
 
