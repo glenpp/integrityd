@@ -206,7 +206,8 @@ class logrules:
 	# run through rules directories updating them
 	def rulesupdate ( self, startup=False ):
 		# we need to check all paths for updates
-		mtimes = {}
+		mtimes = {}	# new/updated directories
+		filesgone = []	# deleted files to remove from rules after
 		for path in self.dirstate:
 			if path not in self.rules: self.rules[path] = {}
 			mtime = os.path.getmtime ( path )
@@ -224,16 +225,16 @@ class logrules:
 							else:
 								self._special ( 'Updated rule file: %s' % os.path.join(path,item) )	# inform
 			# check and prune non-existing files
-			filesgone = []
 			for item in self.rules[path]:
 				if not os.path.isfile ( os.path.join ( path, item ) ):
-					filesgone.append ( item )
+					filesgone.append ( [path,item] )
 					if not startup: self._special ( 'Removed rule file: %s' % os.path.join(path,item) )	# inform
-			for item in filesgone:
-				del  self.dirstate[path]
-				del self.rules[path][item]
 		# update all dirstates
-		for path in mtimes: self.dirstate[path] = mtimes[path]
+		for path in mtimes:
+			self.dirstate[path] = mtimes[path]
+		for items in filesgone:
+			del self.dirstate[item[0]]
+			del self.rules[item[0]][item[1]]
 
 	# read a log file
 	def _readlog ( self, logfile, lastinode, lastposition ):
