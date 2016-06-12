@@ -19,10 +19,10 @@ import socket
 configfile = None
 if len(sys.argv) > 1:
 	configfile = sys.argv[1]
-elif os.path.isfile ( '/etc/integrityd.yaml' ):
-	configfile = '/etc/integrityd.yaml'
-elif os.path.isfile ( 'integrityd.yaml' ):
-	configfile = 'integrityd.yaml'
+elif os.path.isfile ( '/etc/integrityd-log.yaml' ):
+	configfile = '/etc/integrityd-log.yaml'
+elif os.path.isfile ( 'integrityd-log.yaml' ):
+	configfile = 'integrityd-log.yaml'
 
 if not os.path.isfile ( configfile ):
 	sys.exit ( "FATAL - can't find a config file (might be the command line argument)\n" )
@@ -334,11 +334,13 @@ class logrules:
 		for category in report:
 			for logfile in report[category]:
 				for line in report[category][logfile]:
-					newlines.append ( [ host, logfile, line, category, timenow ] )
+					lineclean = ''.join([ i if ord(i) <= 126 and ord(i) >= 32 else r'\x%02x' % ord(i) for i in line ])	# clean out non-ascii
+					newlines.append ( [ host, logfile, lineclean, category, timenow ] )
 		changed = False
 		if len(newlines) > 0:
 			changed = True
 			for line in newlines:
+				print line
 				dbcur.execute ( 'INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', line )
 		for logfile in self.logpositions[host]:
 			if self.logpositions[host][logfile][2]:
@@ -420,6 +422,8 @@ class logrules:
 
 
 print config
+
+# TODO fork
 
 print
 rules = logrules ()
