@@ -2,6 +2,10 @@
 # takes a path on STDIN
 # outputs SHA1 (or NULL) and path on STDOUT
 
+# commands can be sent to set tihngs like burst size and read rate:
+#	send a \n
+#	send the command terminated by \n
+
 
 import sys
 import os
@@ -39,6 +43,7 @@ while True:
 			burst = int(value)
 		elif command == 'byterate':
 			rate = int(value)
+		continue
 	try:
 		starttime = time.time () 
 		with open ( node, 'rb' ) as f:
