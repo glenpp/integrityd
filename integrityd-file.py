@@ -18,6 +18,8 @@ import daemon
 import daemon.pidlockfile
 
 
+# TODO handle deleted nodes
+# TODO handle excludes
 
 
 
@@ -25,9 +27,11 @@ import daemon.pidlockfile
 class filecheck:
 	def __init__ ( self ):
 		self.lastfiletime = 0
-		self._setfastmode ( True )	# start in fast mode
 		# get the checksum helper (Python 3) up
-		self.checksum = subprocess.Popen ( os.path.join ( os.path.dirname ( sys.argv[0] ), 'integrityd-file-checksum.py' ), bufsize=0, universal_newlines=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE )
+		self.checksum = subprocess.Popen ( config['common']['checksumhelper'], bufsize=0, universal_newlines=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE )
+		# we start in fast mode
+		self.fastmode = None
+		self._setfastmode ( True )
 		# get the database up
 		self.db = sqlite3.connect ( config['common']['database'] )
 		self.db.row_factory = sqlite3.Row
@@ -77,38 +81,47 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 		self.checksum.wait()
 
 	def _setfastmode ( self, state ):
-		args = [ os.path.join ( os.path.dirname ( sys.argv[0] ), 'integrityd-file-checksum.py' ) ]
-		command = "\nburst %d\n" % int(config['common']['burst'])
-		self.filetime = 1.0 / config['common']['filerate']
-		if state:
+		if state != ( self.fastmode > 0 ):
+			# state change
+			command = "\nburst %d\n" % int(config['common']['burst'])
+			self.filetime = 1.0 / config['common']['filerate']
+			if state:
+				self.fastmode = int(time.time())	# this is the epoch when a fast cycle is started - LastChecked after this means cycle complete
+				command += "\nbyterate %d\n" % (int(config['common']['byterate'])*int(config['common']['fastmode']))
+				self.filetime /= config['common']['fastmode']
+			else:
+				self.fastmode = 0	# disabled
+				command += "\nbyterate %d\n" % int(config['common']['byterate'])
+			if command != '':
+				self.checksum.stdin.write ( command )
+		elif state:
+			# reset timer
 			self.fastmode = int(time.time())	# this is the epoch when a fast cycle is started - LastChecked after this means cycle complete
-			command += "\nbyterate %d\n" % (int(config['common']['byterate'])*int(config['common']['fastmode']))
-			self.filetime /= config['common']['fastmode']
-		else:
-			self.fastmode = 0	# disabled
-			command += "\nbyterate %d\n" % int(config['common']['byterate'])
-		# get the checksum helper (Python 3) up
-#		self.checksum = subprocess.Popen ( args, bufsize=0, universal_newlines=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE )
-		self.checksum = subprocess.Popen ( args, universal_newlines=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE )
-		if command != '':
-			self.checksum.stdin.write ( command )
 
-	def _sha1file ( self, node ):	# TODO bandwidth management
+	def _time2str ( self, epoch ):
+		return time.strftime ( '%a, %d %b %Y %H:%M:%S %Z', time.localtime ( epoch ) )
+
+	def _sha1file ( self, node ):
+#		print '',node['Path']
 		try:
 			self.checksum.stdin.write ( "%s\n" % node['Path'] )
 			out = self.checksum.stdout.readline ().rstrip ( '\n' )
-			print out
+#			print out
 			out = out.split ( ' ', 1 )
 			if out[1] != node['Path']:
-				Exception ( 'Mismatched data' )
+				raise Exception ( 'Mismatched data for: %s' % str(out) )
+			if out[0] == 'NULL': out[0] = None
+#			print out[0]
+#			print '',out[0]
 			return out[0]
 		except IOError:
 			if self.checksum.poll():
 				err = self.checksum.stderr.readline ()
 				syslog.syslog ( 'Checksum Helper Died: %s' % err )
-			Exception ( 'Checksum Helper Died' )
+			raise Exception ( 'Checksum Helper Died' )
 
 	def _checknode ( self, node ):
+#		print node['Path']
 		nodenow = {}
 		for field in node.keys(): nodenow[field] = node[field]
 		# inspect element
@@ -121,8 +134,10 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 			if os.path.isfile ( node['Path'] ):
 				nodenow['Type'] = 'File'
 				nodenow['SHA1'] = self._sha1file ( nodenow )
+#				print nodenow['SHA1']
 			elif os.path.isdir ( node['Path'] ):
 				nodenow['Type'] = 'Directory'
+				nodenow['SHA1'] = None
 				below = sorted ( os.listdir ( node['Path'] ) )
 				data = "\n".join ( [ item.encode('utf-8') for item in below ] )
 				nodenow['SHA1'] = hashlib.sha1 ( data ).hexdigest()
@@ -146,6 +161,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 		nodenow['CTime'] = int(stat.st_ctime)
 		nodenow['MTime'] = int(stat.st_mtime)
 		nodenow['Size'] = stat.st_size
+#		print nodenow['SHA1']
 
 		# analyse changes
 		changed = False
@@ -160,27 +176,33 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 				if field in ['Path','Parent','ForceCheck','LastChecked']:
 					# skip these
 					pass
-				else:
-					if nodenow[field] != node[field]:
+				elif nodenow[field] != node[field]:
 						changed = True
 						changedfields.append ( field )
 			if changed:
-				changedfields.append ( 'LastChecked' )
 				syslog.syslog ( syslog.LOG_WARNING, 'Changed %s: %s' % ( nodenow['Type'], nodenow['Path'] ) )
+				shortpath = re.sub ( r'^.+?(.{1,20})$', r'... \1', nodenow['Path'] )
 				for field in changedfields:
-					syslog.syslog ( syslog.LOG_WARNING, '    %s: %s :: %s => %s' % ( re.sub ( r'^.+?(.{1,20})$', r'... \1', nodenow['Path'] ), field, node[field], nodenow[field] ) )
+					if field in ['CTime','MTime']:
+						syslog.syslog ( syslog.LOG_WARNING, '    %s: %s :: %s => %s' % ( shortpath, field, self._time2str(node[field]), self._time2str(nodenow[field]) ) )
+					else:
+						syslog.syslog ( syslog.LOG_WARNING, '    %s: %s :: %s => %s' % ( shortpath, field, node[field], nodenow[field] ) )
+				syslog.syslog ( syslog.LOG_WARNING, '    %s: LastChecked :: %s' % (shortpath, self._time2str(node['LastChecked'])) )
 		if changed:
 			# changed and directory, set mustcheck on all subnodes
 			if nodenow['Type'] == 'Directory':
 				self.dbcur.execute ( "UPDATE NodeInfo SET ForceCheck = 1 WHERE Parent = ?", [nodenow['id']] )
-			# update database with new data
-			items = ', '.join ( [ '%s = ?' % field for field in changedfields ] )
-			values = [ nodenow[field] for field in changedfields ]
-			values.append ( nodenow['id'] )
-			self.dbcur.execute ( "UPDATE NodeInfo SET %s WHERE id = ?" % items, values )
+		# update database with new data
+		changedfields.append ( 'LastChecked' )
+		if nodenow['ForceCheck'] != node['ForceCheck']: changedfields.append ( 'ForceCheck' )
+		items = ', '.join ( [ '%s = ?' % field for field in changedfields ] )
+		values = [ nodenow[field] for field in changedfields ]
+		values.append ( nodenow['id'] )
+		self.dbcur.execute ( "UPDATE NodeInfo SET %s WHERE id = ?" % items, values )
+		if changed:
 			# switch to fastmode if needed
+			self._setfastmode ( True )
 			if self.fastmode == 0:
-				self._setfastmode ( True )
 				syslog.syslog ( 'FastMode Start' )
 
 
@@ -202,7 +224,6 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 			now = time.time()
 			delay = self.filetime - ( now - self.lastfiletime )
 			self.lastfiletime = self.lastfiletime + self.filetime
-			print ( delay )
 			if delay > 0.0:
 				time.sleep ( delay )
 			else:
@@ -254,23 +275,25 @@ with open ( configfile, 'r' ) as f:
 	config = yaml.load ( f )
 	f.close ()
 
-
+# if not specified in the config, add checksum helper
+if 'checksumhelper' not in config['common']:
+	config['common']['checksumhelper'] = os.path.abspath ( os.path.join ( os.path.dirname ( sys.argv[0] ), 'integrityd-file-checksum.py' ) )
 
 
 
 
 def rundaemon():
-#	try:
+	try:
 		syslog.syslog ( 'starting daemon' )
 		check = filecheck ()
 		syslog.syslog ( 'entering loop' )
-#		while True:
-#			check.autocheck ()
-		check.cycle ( 100 )
-#			time.sleep ( 5.0 + 2.0 * random.random () )
-#	except Exception as e:
-#		syslog.syslog ( 'exception: %s' % str(e) )
-#	syslog.syslog ( 'exiting' )
+		while True:
+			check.cycle ( 100 )
+	except:
+		etype, evalue, etrace = sys.exc_info()
+		import traceback
+		syslog.syslog ( syslog.LOG_ERR, 'exception: %s' % '!! '.join ( traceback.format_exception ( etype, evalue, etrace ) ) )
+	syslog.syslog ( 'exiting' )
 
 # sort out class that actually does the work
 if args['init']:
@@ -284,24 +307,8 @@ if args['init']:
 	syslog.syslog ( 'init complete' )
 else:
 	# regular daemon startup
-#	with daemon.DaemonContext( umask=0o077, pidfile=daemon.pidlockfile.PIDLockFile('/run/integrityd-file.pid') ):
+	with daemon.DaemonContext( umask=0o077, pidfile=daemon.pidlockfile.PIDLockFile('/run/integrityd-file.pid') ):
 		rundaemon()
 
-
-
-# 
-# Run:
-# pull 100 oldest checked must-check entries from database
-# pull remainder of 100 oldest checked not must-check entries from database
-# sort random
-# check each node
-# 
-# 
-# 
-# Node check:
-# - stat
-#   - add to changed list
-# if directory:
-# 
 
 
