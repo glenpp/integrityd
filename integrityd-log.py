@@ -8,56 +8,16 @@ import sqlite3
 import time
 import re
 import subprocess
+import random
 import socket
+import syslog
+# see https://www.python.org/dev/peps/pep-3143/#example-usage
+import daemon
+import daemon.pidlockfile
 
 
 
 
-
-
-# one argument - config file, else looks for a few options
-configfile = None
-if len(sys.argv) > 1:
-	configfile = sys.argv[1]
-elif os.path.isfile ( '/etc/integrityd-log.yaml' ):
-	configfile = '/etc/integrityd-log.yaml'
-elif os.path.isfile ( 'integrityd-log.yaml' ):
-	configfile = 'integrityd-log.yaml'
-
-if not os.path.isfile ( configfile ):
-	sys.exit ( "FATAL - can't find a config file (might be the command line argument)\n" )
-
-# read in conf
-with open ( configfile, 'r' ) as f:
-	config = yaml.load ( f )
-	f.close ()
-
-
-# get database up
-db = sqlite3.connect ( config['common']['database'] )
-db.row_factory = sqlite3.Row
-dbcur = db.cursor()
-
-# put the tables in we need (if we need them)
-dbcur.execute ( """
-CREATE TABLE IF NOT EXISTS `LogPosition` (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    Host CHAR(40) NOT NULL,
-    LogFile TEXT NOT NULL UNIQUE,
-    Inode INT UNSIGNED NOT NULL,
-    Position INT UNSIGNED NOT NULL
-)""" )
-dbcur.execute ( """CREATE INDEX IF NOT EXISTS LogPosition_LogFile ON LogPosition(LogFile)""" )
-dbcur.execute ( """
-CREATE TABLE IF NOT EXISTS `LogReport` (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    Host CHAR(40) NOT NULL,
-    LogFile TEXT NOT NULL,
-    Line TEXT NOT NULL,
-    Priority CHAR(20) NOT NULL,
-    Time INT UNSIGNED NOT NULL DEFAULT 0
-)""" )
-dbcur.execute ( """CREATE INDEX IF NOT EXISTS LogReport_Priority ON LogReport(Priority)""" )
 
 
 
@@ -94,7 +54,6 @@ def mail ( subject, lines ):
 
 class logrules:
 	def __init__ ( self ):
-		global dbcur
 		self.dirstate = {}	# holds last change times of paths we track
 		self.rules = {}	# holds paths, files below those and lists of rules in those files
 		self.hosts = {}	# holds the host, categories and list of paths relevant to the catoegory
@@ -104,6 +63,31 @@ class logrules:
 		self.checktimer = timer ( config['logcheck']['checkinterval'] )
 		self.rulesupdatetimer = timer ( config['logcheck']['rulesfreshness'] )
 		self.holdofftime = 0	# startup with no holdoff
+		# get the database up
+		self.db = sqlite3.connect ( config['common']['database'] )
+		self.db.row_factory = sqlite3.Row
+		self.dbcur = self.db.cursor()
+		# put the tables in we need (if we need them)
+		self.dbcur.execute ( """
+CREATE TABLE IF NOT EXISTS `LogPosition` (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    Host CHAR(40) NOT NULL,
+    LogFile TEXT NOT NULL UNIQUE,
+    Inode INT UNSIGNED NOT NULL,
+    Position INT UNSIGNED NOT NULL
+)""" )
+		self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS LogPosition_LogFile ON LogPosition(LogFile)""" )
+		self.dbcur.execute ( """
+CREATE TABLE IF NOT EXISTS `LogReport` (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    Host CHAR(40) NOT NULL,
+    LogFile TEXT NOT NULL,
+    Line TEXT NOT NULL,
+    Priority CHAR(20) NOT NULL,
+    Time INT UNSIGNED NOT NULL DEFAULT 0
+)""" )
+		self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS LogReport_Priority ON LogReport(Priority)""" )
+		self.db.commit ();
 		# populate host configs we work against
 		for host in config['logcheck']['hosts']:
 			hostconfig = {
@@ -128,25 +112,26 @@ class logrules:
 				hostconfig['ignore'].append ( os.path.join ( baserules, 'ignore.d.workstation' ) )
 			# now add local rules, assuming they are all ignores if there are no dirs
 			gotrules = False
-			for category in ['cracking','cracking.ignore','violations','violations.ignore']:
-				if os.path.isdir ( os.path.join ( host['localrules'], '%s.d' % category ) ):
-					hostconfig[category].append ( os.path.join ( host['localrules'], '%s.d' % category ) )
+			if 'localrules' in host:
+				for category in ['cracking','cracking.ignore','violations','violations.ignore']:
+					if os.path.isdir ( os.path.join ( host['localrules'], '%s.d' % category ) ):
+						hostconfig[category].append ( os.path.join ( host['localrules'], '%s.d' % category ) )
+						gotrules = True
+				localmode = basemode
+				if 'localmode' in host: localmode = host['localmode']
+				if os.path.isdir ( os.path.join ( host['localrules'], 'ignore.d.paranoid' ) ):
+					hostconfig['ignore'].append ( os.path.join ( host['localrules'], 'ignore.d.paranoid' ) )
 					gotrules = True
-			localmode = basemode
-			if 'localmode' in host: localmode = host['localmode']
-			if os.path.isdir ( os.path.join ( host['localrules'], 'ignore.d.paranoid' ) ):
-				hostconfig['ignore'].append ( os.path.join ( host['localrules'], 'ignore.d.paranoid' ) )
-				gotrules = True
-			if localmode in ['workstation','server']:
-				if os.path.isdir ( os.path.join ( host['localrules'], 'ignore.d.server' ) ):
-					hostconfig['ignore'].append ( os.path.join ( host['localrules'], 'ignore.d.server' ) )
-					gotrules = True
-			if localmode in ['workstation']:
-				if os.path.isdir ( os.path.join ( host['localrules'], 'ignore.d.workstation' ) ):
-					hostconfig['ignore'].append ( os.path.join ( host['localrules'], 'ignore.d.workstation' ) )
-					gotrules = True
-			# if we didn't get any of the dirs, then assme the directory given is an ignore directory
-			if not gotrules: hostconfig['ignore'].append ( host['localrules'] )
+				if localmode in ['workstation','server']:
+					if os.path.isdir ( os.path.join ( host['localrules'], 'ignore.d.server' ) ):
+						hostconfig['ignore'].append ( os.path.join ( host['localrules'], 'ignore.d.server' ) )
+						gotrules = True
+				if localmode in ['workstation']:
+					if os.path.isdir ( os.path.join ( host['localrules'], 'ignore.d.workstation' ) ):
+						hostconfig['ignore'].append ( os.path.join ( host['localrules'], 'ignore.d.workstation' ) )
+						gotrules = True
+				# if we didn't get any of the dirs, then assme the directory given is an ignore directory
+				if not gotrules: hostconfig['ignore'].append ( host['localrules'] )
 			# we should now have all the config for this host
 			self.hosts[host['name']] = hostconfig
 			self.logfiles[host['name']] = host['logfiles']
@@ -161,8 +146,8 @@ class logrules:
 		self.rulesupdate ( True )
 		# read LogPosition from database, cleanup unconfigured logs from database
 		cleanup = []
-		dbcur.execute ( 'SELECT * FROM LogPosition' )
-		for row in dbcur:
+		self.dbcur.execute ( 'SELECT * FROM LogPosition' )
+		for row in self.dbcur:
 			if row['Host'] not in self.logfiles or row['LogFile'] not in self.logfiles[row['Host']]:
 				cleanup.append ( row['id'] )
 			else:
@@ -170,12 +155,12 @@ class logrules:
 				self.logpositions[row['Host']][row['LogFile']] = [ row['Inode'], row['Position'], False ]
 		if len(cleanup) > 0:
 			for rowid in cleanup:
-				dbcur.execute ( 'DELETE FROM LogPosition WHERE id = ?', [ rowid ] )
-			db.commit ()
+				self.dbcur.execute ( 'DELETE FROM LogPosition WHERE id = ?', [ rowid ] )
+			self.db.commit ()
 		# trigger mailing cycle - flush whatever is already in the database
 		self._special ( '%s starting up' % sys.argv[0] )
-		dbcur.execute ( 'SELECT COUNT(*) FROM LogReport' )
-		if dbcur.fetchone()['COUNT(*)'] > 0: self._send ()
+		self.dbcur.execute ( 'SELECT COUNT(*) FROM LogReport' )
+		if self.dbcur.fetchone()['COUNT(*)'] > 0: self._send ()
 
 	# read in a rules file
 	def _readrules ( self, path, item ):
@@ -244,6 +229,7 @@ class logrules:
 		stat = os.fstat ( fd )
 		f = os.fdopen ( fd )
 		if lastinode != None and stat.st_ino != lastinode:
+			self._special ( "logfile has been rotated %s" % logfile )
 			# this is not the same file - presume logs rotated so find previous and finish it up
 			lastlogfile = None
 			for lastfile in os.listdir ( os.path.dirname ( logfile ) ):
@@ -265,8 +251,8 @@ class logrules:
 					else:
 						lines.append ( line )
 			else:
-				# flag and report this TODO
-				print "bad - can't find last logfile against %s" % logfile
+				# flag and report this
+				self._special ( "bad - can't find last logfile against %s" % logfile )
 			# whatever happens, we now have to start again for the current logfile
 			lastposition = None
 		# we need to seek to the last valid position
@@ -298,7 +284,6 @@ class logrules:
 				
 	# given a host return matching items
 	def checklogs ( self, host ):
-		global dbcur
 		report = {
 				'cracking': {},
 				'violations': {},
@@ -341,21 +326,20 @@ class logrules:
 			changed = True
 			for line in newlines:
 				print line
-				dbcur.execute ( 'INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', line )
+				self.dbcur.execute ( 'INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', line )
 		for logfile in self.logpositions[host]:
 			if self.logpositions[host][logfile][2]:
 				# something changed
 				changed = True
-				dbcur.execute ( 'INSERT OR REPLACE INTO LogPosition (Host,LogFile,Inode,Position) VALUES (?,?,?,?)', [ host, logfile, self.logpositions[host][logfile][0], self.logpositions[host][logfile][1] ] )
+				self.dbcur.execute ( 'INSERT OR REPLACE INTO LogPosition (Host,LogFile,Inode,Position) VALUES (?,?,?,?)', [ host, logfile, self.logpositions[host][logfile][0], self.logpositions[host][logfile][1] ] )
 				# reset for next time
 				self.logpositions[host][logfile][2] = False
-		if changed: db.commit ()
+		if changed: self.db.commit ()
 
 	# log a special message
 	def _special ( self, message ):
-		global dbcur
-		dbcur.execute ( 'INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', ['__HOST__','--SPECIAL--',message,'special',int(time.time())] )
-		db.commit ()
+		self.dbcur.execute ( 'INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', ['__HOST__','--SPECIAL--',message,'special',int(time.time())] )
+		self.db.commit ()
 
 	# check all the logs in the config
 	def checkalllogs ( self ):
@@ -364,7 +348,6 @@ class logrules:
 
 	# automated check of everything
 	def autocheck ( self ):
-		global dbcur
 		if self.rulesupdatetimer.timer ():
 			self.rulesupdate ()
 		if not self.checktimer.timer (): return
@@ -372,11 +355,11 @@ class logrules:
 		# check if we need to mail out
 		mustsend = False
 		# query database for number of non-standard logs - immediate send
-		dbcur.execute ( 'SELECT COUNT(*) FROM LogReport WHERE Priority != \'normal\'' )
-		if dbcur.fetchone()['COUNT(*)'] > 0: mustsend = True
+		self.dbcur.execute ( 'SELECT COUNT(*) FROM LogReport WHERE Priority != \'normal\'' )
+		if self.dbcur.fetchone()['COUNT(*)'] > 0: mustsend = True
 		# query database of oldest standard (normal) message - if it trips the timer then ssend unless in holdoff
-		dbcur.execute ( 'SELECT MIN(Time) FROM LogReport WHERE Priority = \'normal\'' )
-		oldest = dbcur.fetchone()['MIN(Time)']
+		self.dbcur.execute ( 'SELECT MIN(Time) FROM LogReport WHERE Priority = \'normal\'' )
+		oldest = self.dbcur.fetchone()['MIN(Time)']
 		timenow = int(time.time())
 		if oldest != None and timenow >= oldest + config['common']['reporttime'] and timenow >= self.holdofftime:
 			mustsend = True
@@ -386,7 +369,6 @@ class logrules:
 
 	# TODO check and generate mail subject and text, pass to generic mailing TODO
 	def _send ( self ):
-		global dbcur
 		print "send"
 		# TODO
 		messagelines = []
@@ -394,8 +376,8 @@ class logrules:
 		# query in order of priority, then host
 		for priority in ['special','cracking','violations','normal']:
 			for host in self.hostorder:
-				dbcur.execute ( 'SELECT * FROM LogReport WHERE Priority = ? AND Host = ? ORDER BY LogFile,Time', [ priority, host ] )
-				for row in dbcur:
+				self.dbcur.execute ( 'SELECT * FROM LogReport WHERE Priority = ? AND Host = ? ORDER BY LogFile,Time', [ priority, host ] )
+				for row in self.dbcur:
 					if row['LogFile'] != logfile:
 						messagelines.append ( '' )
 						messagelines.append ( "%s :: %s" % (priority,row['LogFile']) )
@@ -409,8 +391,8 @@ class logrules:
 		# send these
 		mail ( 'Log Report for %s' % hostname, messagelines )
 		# nuke these entries
-		dbcur.execute ( 'DELETE FROM LogReport' )
-		db.commit ()
+		self.dbcur.execute ( 'DELETE FROM LogReport' )
+		self.db.commit ()
 		# on send set holdoff timer
 		self.holdofftime = int(time.time()) + config['common']['reportholdoff']
 
@@ -418,20 +400,48 @@ class logrules:
 
 
 
+# get logging up
+syslog.openlog ( logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON )
+syslog.syslog ( 'Starting up with args: %s' % (str(sys.argv[1:]) if len(sys.argv) > 1 else 'None') )
+
+# one argument - config file, else looks for a few options
+configfile = None
+if len(sys.argv) > 1:
+	configfile = sys.argv[1]
+elif os.path.isfile ( '/etc/integrityd-log.yaml' ):
+	configfile = '/etc/integrityd-log.yaml'
+elif os.path.isfile ( 'integrityd-log.yaml' ):
+	configfile = 'integrityd-log.yaml'
+syslog.syslog ( 'Using config: %s' % configfile )
+
+if not os.path.isfile ( configfile ):
+	sys.exit ( "FATAL - can't find a config file (might be the command line argument)\n" )
+
+# read in conf
+with open ( configfile, 'r' ) as f:
+	config = yaml.load ( f )
+	f.close ()
 
 
 
-print config
 
-# TODO fork
 
-print
-rules = logrules ()
-print
-#		for host in config['logcheck']['hosts']:
-while True:
-	rules.autocheck ()
-	time.sleep ( 5 )	# TODO put a small random component to this
+def rundaemon():
+	try:
+		syslog.syslog ( 'starting daemon' )
+		rules = logrules ()
+		syslog.syslog ( 'entering loop' )
+		while True:
+			rules.autocheck ()
+			time.sleep ( 5.0 + 2.0 * random.random () )
+	except Exception as e:
+		syslog.syslog ( 'exception: %s' % str(e) )
+	syslog.syslog ( 'exiting' )
+
+# sort out class that actually does the work
+with daemon.DaemonContext( umask=0o077, pidfile=daemon.pidlockfile.PIDLockFile('/run/integrityd-log.pid') ):
+	rundaemon()
+#rundaemon()
 
 
 
