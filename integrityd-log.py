@@ -434,8 +434,10 @@ def rundaemon():
 		while True:
 			rules.autocheck ()
 			time.sleep ( 5.0 + 2.0 * random.random () )
-	except Exception as e:
-		syslog.syslog ( 'exception: %s' % str(e) )
+	except:
+		etype, evalue, etrace = sys.exc_info()
+		import traceback
+		syslog.syslog ( syslog.LOG_ERR, 'exception: %s' % '!! '.join ( traceback.format_exception ( etype, evalue, etrace ) ) )
 	syslog.syslog ( 'exiting' )
 
 # sort out class that actually does the work
