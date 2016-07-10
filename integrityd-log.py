@@ -88,6 +88,8 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 )""" )
 		self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS LogReport_Priority ON LogReport(Priority)""" )
 		self.db.commit ();
+		# make sure the database is not accessible by others
+		os.chmod ( config['common']['database'], 0600 )
 		# populate host configs we work against
 		for host in config['logcheck']['hosts']:
 			hostconfig = {
