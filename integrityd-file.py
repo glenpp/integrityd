@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 		self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS NodeInfo_LastChecked ON NodeInfo(LastChecked)""" )
 		self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS NodeInfo_ForceCheck ON NodeInfo(ForceCheck)""" )
 		self.db.commit ();
+		# make sure the database is not accessible by others
+		os.chmod ( config['common']['database'], 0600 )
 		# remove paths without parents that aren't areas we watch, cycling through to catch all children
 		deleted = 1	# make sure we run on the first cycle
 		while deleted > 0:
@@ -334,7 +336,14 @@ with open ( configfile, 'r' ) as f:
 
 # if not specified in the config, add checksum helper
 if 'checksumhelper' not in config['common']:
-	config['common']['checksumhelper'] = os.path.abspath ( os.path.join ( os.path.dirname ( sys.argv[0] ), 'integrityd-file-checksum.py' ) )
+	paths = [	# where to search
+			os.path.abspath ( os.path.join ( os.path.dirname ( sys.argv[0] ), 'integrityd-file-checksum.py' ) ),
+			'/usr/local/share/integrityd-file-checksum.py',
+		]
+	for path in paths:
+		if os.path.isfile ( path ):
+			config['common']['checksumhelper'] = path
+			break
 
 # break up excludes
 excludes = { 'branch': {} }
@@ -351,8 +360,6 @@ for path in config['filecheck']['exclude']:
 				}
 		ptr = ptr[part]
 	ptr['leaf'] = True
-import pprint
-pprint.pprint ( excludes )
 
 
 
