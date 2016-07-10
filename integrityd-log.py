@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 		# update all dirstates
 		for path in mtimes:
 			self.dirstate[path] = mtimes[path]
-		for items in filesgone:
+		for item in filesgone:
 			del self.dirstate[item[0]]
 			del self.rules[item[0]][item[1]]
 
