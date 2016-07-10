@@ -1,0 +1,55 @@
+# TODO config for Python integrityd
+# only does logcheck
+
+
+common:
+  # where we keep track of what is going on
+  database: /var/local/integrityd-log.sqlite3
+  # who to report to
+  email: root@localhost
+  # mail sender (mail / mailx)
+  mailcommand: /usr/bin/mail
+  # pool changes for this long before sending (unless high priority)
+  reporttime: 30
+  # wait this long after a report before sending again (unless high priority)
+  reportholdoff: 900
+
+
+
+
+
+logcheck:
+  baserules: /etc/logcheck
+  basemode: paranoid
+#  localrules: /some/default/
+#  localmode: paranoid
+  checkinterval: 10
+  rulesfreshness: 60
+  hosts:
+    # reports are ordered by the order of these hosts
+    - name: somemachine
+#      baserules: /etc/logcheck
+#      basemode: paranoid
+      localrules: /etc/integrityd/logrules-somemachine
+#      localmode: paranoid
+      logfiles:
+        - /var/log/syslog
+        - /var/log/auth.log
+    - name: container
+      localrules: /etc/integrityd/logrules-container
+#      localmode: paranoid
+      logfiles:
+        - /var/lib/lxc/container/rootfs/var/log/syslog
+        - /var/lib/lxc/container/rootfs/var/log/auth.log
+        - /var/lib/lxc/container/rootfs/var/log/fail2ban.log
+        - /var/lib/lxc/container/rootfs/var/log/apache2/error.log
+
+
+
+
+
+
+
+
+
+
