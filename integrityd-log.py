@@ -434,7 +434,7 @@ def rundaemon():
 		while True:
 			rules.autocheck ()
 			time.sleep ( 5.0 + 2.0 * random.random () )
-	except:
+	except Exception:	# catch excptions, but not all else we catch daemon terminating
 		etype, evalue, etrace = sys.exc_info()
 		import traceback
 		syslog.syslog ( syslog.LOG_ERR, 'exception: %s' % '!! '.join ( traceback.format_exception ( etype, evalue, etrace ) ) )
