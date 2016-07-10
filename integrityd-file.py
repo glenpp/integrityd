@@ -18,15 +18,14 @@ import daemon
 import daemon.pidlockfile
 
 
-# TODO handle deleted nodes
-# TODO delete child nodes from db when parents are removed - we also need to do this with our current batch wich might contain these records
 
 
 
-
+# main class for tracking node changes
 class filecheck:
 	def __init__ ( self ):
 		self.lastfiletime = 0
+		self.reitterate = False
 		# get the checksum helper (Python 3) up
 		self.checksum = subprocess.Popen ( config['common']['checksumhelper'], bufsize=0, universal_newlines=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE )
 		# we start in fast mode
@@ -150,34 +149,59 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 			self.dbcur.execute ( "DELETE FROM NodeInfo WHERE id = ?", [node['id']] )
 			return
 		# inspect element
-		if os.path.islink ( node['Path'] ):
-			stat = os.lstat ( node['Path'] )
-			nodenow['Type'] = 'Symlink'
-			nodenow['LinkDest'] = os.readlink ( node['Path'] )
-			nodenow['SHA1'] = None
-		else:
-			if os.path.isfile ( node['Path'] ):
-				nodenow['Type'] = 'File'
-				nodenow['SHA1'] = self._sha1file ( nodenow )
-#				print nodenow['SHA1']
-			elif os.path.isdir ( node['Path'] ):
-				nodenow['Type'] = 'Directory'
+		try:
+			if os.path.islink ( node['Path'] ):
+				stat = os.lstat ( node['Path'] )
+				nodenow['Type'] = 'Symlink'
+				nodenow['LinkDest'] = os.readlink ( node['Path'] )
 				nodenow['SHA1'] = None
-				below = sorted ( os.listdir ( node['Path'] ) )
-				data = "\n".join ( [ item.encode('utf-8') for item in below ] )
-				nodenow['SHA1'] = hashlib.sha1 ( data ).hexdigest()
-				for subnode in below:
-					subpath = os.path.join(node['Path'],subnode)
-					if self._checkexclude( subpath ):
-						continue	# skip excluded
-					self.dbcur.execute ( "INSERT OR IGNORE INTO NodeInfo (Path,Parent,LastChecked,ForceCheck,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,?,0,1,'New',0,0,0,0,0,0)", [subpath,nodenow['id']] )
 			else:
-				# sockets, pipes, devices etc.
-				# don't read these, but do stat them
-				nodenow['Type'] = 'Other'
-				nodenow['SHA1'] = None
-			stat = os.stat ( node['Path'] )
-			nodenow['LinkDest'] = None
+				if os.path.isfile ( node['Path'] ):
+					nodenow['Type'] = 'File'
+					nodenow['SHA1'] = self._sha1file ( nodenow )
+#					print nodenow['SHA1']
+				elif os.path.isdir ( node['Path'] ):
+					nodenow['Type'] = 'Directory'
+					nodenow['SHA1'] = None
+					below = sorted ( os.listdir ( node['Path'] ) )
+					data = "\n".join ( [ item.encode('utf-8') for item in below ] )
+					nodenow['SHA1'] = hashlib.sha1 ( data ).hexdigest()
+					for subnode in below:
+						subpath = os.path.join(node['Path'],subnode)
+						if self._checkexclude( subpath ):
+							continue	# skip excluded
+						self.dbcur.execute ( "INSERT OR IGNORE INTO NodeInfo (Path,Parent,LastChecked,ForceCheck,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,?,0,1,'New',0,0,0,0,0,0)", [subpath,nodenow['id']] )
+				else:
+					# sockets, pipes, devices etc.
+					# don't read these, but do stat them
+					nodenow['Type'] = 'Other'
+					nodenow['SHA1'] = None
+				stat = os.stat ( node['Path'] )
+				nodenow['LinkDest'] = None
+		except OSError, e:
+			# check for deletion (handle)
+			if e.strerror == 'No such file or directory':
+				syslog.syslog ( syslog.LOG_WARNING, 'Deleted %s: %s' % ( node['Type'], node['Path'] ) )
+				parents = [ node['id'] ]
+				while len(parents) > 0:
+					todelete = []
+					for parent in parents:
+						self.dbcur.execute ( 'SELECT id,Path,Type FROM NodeInfo WHERE Parent = ?', [parent] )
+						for row in self.dbcur:
+							self.reitterate = True	# we have made changes that may impact running list
+							todelete.append ( row['id'] )
+							syslog.syslog ( syslog.LOG_WARNING, '+Deleted %s: %s' % ( row['Type'], row['Path'] ) )
+						self.dbcur.execute ( 'DELETE FROM NodeInfo WHERE id = ?', [parent] )
+					parents = todelete
+				return
+			etype, evalue, etrace = sys.exc_info()
+			raise etype, evalue, etrace
+#			syslog.syslog ( str(dir(e)) )
+#			syslog.syslog ( str(e.filename) )
+#			syslog.syslog ( e.strerror )
+#			syslog.syslog ( str([etype,evalue]) )
+#			syslog.syslog ( "----" )
+#			return
 #		nodenow['Parent'] = No Change
 		nodenow['LastChecked'] = int(time.time())
 		nodenow['ForceCheck'] = 0
@@ -235,6 +259,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 
 
 
+	# do a cycle of "number" items
 	def cycle ( self, number ):
 		# get nodes for this cycle up to number
 		# TODO possibly prioritise directories - a delta there means something in them has changed TODO
@@ -247,8 +272,12 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 		# randomise order for security (attacker can't mitigate by guessing what's next)
 		random.shuffle ( nodes )
 
-		# we have our batch - check all the nodes TODO bandwith management
+		# we have our batch - check all the nodes
 		for node in nodes:
+			if self.reitterate:
+				# something changed that impacts this cycle - break so we re-query
+				self.reitterate = False
+				break
 			now = time.time()
 			delay = self.filetime - ( now - self.lastfiletime )
 			self.lastfiletime = self.lastfiletime + self.filetime
