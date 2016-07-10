@@ -1,0 +1,16 @@
+# local unit to go in /etc/systemd/system/
+
+[Unit]
+Description=Log Anomaly (Integrity) Monitor
+After=syslog.target local-fs.target mail-transport-agent.target
+Documentation=https://www.pitt-pladdy.com/blog/...
+
+[Service]
+ExecStart=/usr/local/sbin/integrityd-log.py
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+#Alias=integrityd-file.service
+

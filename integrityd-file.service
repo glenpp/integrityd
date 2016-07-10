@@ -1,0 +1,16 @@
+# local unit to go in /etc/systemd/system/
+
+[Unit]
+Description=File Integrity Monitor
+After=syslog.target local-fs.target
+Documentation=https://www.pitt-pladdy.com/blog/...
+
+[Service]
+ExecStart=/usr/local/sbin/integrityd-file.py
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+#Alias=integrityd-file.service
+
