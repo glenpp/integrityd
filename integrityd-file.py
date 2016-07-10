@@ -19,7 +19,7 @@ import daemon.pidlockfile
 
 
 # TODO handle deleted nodes
-# TODO handle excludes
+# TODO delete child nodes from db when parents are removed - we also need to do this with our current batch wich might contain these records
 
 
 
@@ -61,14 +61,19 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 		self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS NodeInfo_LastChecked ON NodeInfo(LastChecked)""" )
 		self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS NodeInfo_ForceCheck ON NodeInfo(ForceCheck)""" )
 		self.db.commit ();
-		# remove paths without parents that aren't areas we watch
-		todelete = []
-		self.dbcur.execute ( "SELECT id,Path FROM NodeInfo WHERE Parent IS NULL" )
-		for row in self.dbcur:
-			if row['Path'] not in config['filecheck']['areas']:
-				todelete.append ( row['id'] )
-		for id in todelete:
-			self.dbcur.execute ( "DELETE FROM NodeInfo WHERE id = ?", [id] )
+		# remove paths without parents that aren't areas we watch, cycling through to catch all children
+		deleted = 1	# make sure we run on the first cycle
+		while deleted > 0:
+			todelete = []
+			self.dbcur.execute ( "SELECT id,Path FROM NodeInfo WHERE Parent IS NULL" )
+			for row in self.dbcur:
+				if row['Path'] not in config['filecheck']['areas']:
+					todelete.append ( row['id'] )
+					syslog.syslog ( 'Clean up unmonitored path: %s' % row['Path'] )
+			for id in todelete:
+				self.dbcur.execute ( "UPDATE NodeInfo SET Parent = NULL WHERE Parent = ?", [id] )
+				self.dbcur.execute ( "DELETE FROM NodeInfo WHERE id = ?", [id] )
+			deleted = len(todelete)
 		# add starting records if needed
 		for path in config['filecheck']['areas']:
 			self.dbcur.execute ( "SELECT COUNT(*) FROM NodeInfo WHERE Path = ?", [path] )
@@ -120,10 +125,30 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 				syslog.syslog ( 'Checksum Helper Died: %s' % err )
 			raise Exception ( 'Checksum Helper Died' )
 
+	def _checkexclude ( self, path ):
+		parts = path.split ( os.sep )
+		if parts[0] == '': parts.pop ( 0 )
+		ptr = excludes
+		excluded = False
+		for part in parts:
+			if part in ptr['branch']:
+				ptr = ptr['branch'][part]
+				if ptr['leaf']:
+					excluded = True
+					break
+		return excluded
+				
+
 	def _checknode ( self, node ):
 #		print node['Path']
 		nodenow = {}
 		for field in node.keys(): nodenow[field] = node[field]
+		# check exclusion
+		if self._checkexclude( node['Path'] ):
+			syslog.syslog ( "remove excluded record: %s" % node['Path'] )
+			# remove from database
+			self.dbcur.execute ( "DELETE FROM NodeInfo WHERE id = ?", [node['id']] )
+			return
 		# inspect element
 		if os.path.islink ( node['Path'] ):
 			stat = os.lstat ( node['Path'] )
@@ -142,7 +167,10 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 				data = "\n".join ( [ item.encode('utf-8') for item in below ] )
 				nodenow['SHA1'] = hashlib.sha1 ( data ).hexdigest()
 				for subnode in below:
-					self.dbcur.execute ( "INSERT OR IGNORE INTO NodeInfo (Path,Parent,LastChecked,ForceCheck,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,?,0,1,'New',0,0,0,0,0,0)", [os.path.join(node['Path'],subnode),nodenow['id']] )
+					subpath = os.path.join(node['Path'],subnode)
+					if self._checkexclude( subpath ):
+						continue	# skip excluded
+					self.dbcur.execute ( "INSERT OR IGNORE INTO NodeInfo (Path,Parent,LastChecked,ForceCheck,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,?,0,1,'New',0,0,0,0,0,0)", [subpath,nodenow['id']] )
 			else:
 				# sockets, pipes, devices etc.
 				# don't read these, but do stat them
@@ -279,6 +307,24 @@ with open ( configfile, 'r' ) as f:
 if 'checksumhelper' not in config['common']:
 	config['common']['checksumhelper'] = os.path.abspath ( os.path.join ( os.path.dirname ( sys.argv[0] ), 'integrityd-file-checksum.py' ) )
 
+# break up excludes
+excludes = { 'branch': {} }
+for path in config['filecheck']['exclude']:
+	ptr = excludes
+	parts = path.split ( os.sep )
+	if parts[0] == '': parts.pop ( 0 )
+	for part in parts:
+		ptr = ptr['branch']
+		if part not in ptr:
+			ptr[part] = {
+					'leaf': False,
+					'branch': {},
+				}
+		ptr = ptr[part]
+	ptr['leaf'] = True
+import pprint
+pprint.pprint ( excludes )
+
 
 
 
@@ -289,7 +335,7 @@ def rundaemon():
 		syslog.syslog ( 'entering loop' )
 		while True:
 			check.cycle ( 100 )
-	except:
+	except Exception:	# catch excptions, but not all else we catch daemon terminating
 		etype, evalue, etrace = sys.exc_info()
 		import traceback
 		syslog.syslog ( syslog.LOG_ERR, 'exception: %s' % '!! '.join ( traceback.format_exception ( etype, evalue, etrace ) ) )
