@@ -1,0 +1,46 @@
+# TODO config for Python integrityd
+# only does logcheck for now, but will grow
+
+
+common:
+  # where we keep track of what is going on
+  database: /var/local/integrityd-file.sqlite3
+  # checksum helper (python3)
+#  checksumhelper: /path/to/integrityd-file-checksum.py
+  # file checing controls
+  # how many bytes/second to checksum at
+  byterate: 262144
+  # chunks we read in - files smaller than this are read in one shot
+  burst: 131072
+  # action to run on each changed file (argument given)
+  # how many files to process per second
+  filerate: 1
+  # what factor to speed up by when changes are detected
+  fastmode: 20
+
+
+
+
+filecheck:
+  areas:
+    - /usr/bin/
+    - /usr/sbin/
+    - /usr/lib/
+    - /bin
+    - /sbin
+    - /lib
+    - /boot
+    - /etc
+    - /vmlinuz
+  exclude:
+    # TODO we may want to look at stripping trailing "/" or giving it some meaning
+    - /etc/mtab
+    - /etc/lvm/archive
+    - /etc/lvm/backup
+    - /etc/lvm/cache
+    - /var/lib/lxc/somecontainer/rootfs/etc/mtab
+    - /etc/cups
+    - /etc/openvpn/ipp.txt
+
+
+
