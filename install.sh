@@ -1,11 +1,19 @@
 #!/bin/sh
 
-cp -i integrityd-file.yaml /etc/
-cp -i integrityd-file-checksum.py /usr/local/share/
-cp -i integrityd-file.py /usr/local/sbin/
-cp -i integrityd-file.service /etc/systemd/system/
+newercp () {
+	sourcefile=$1
+	destdir=$2
+	dest="$destdir/$sourcefile"
+	if [ -f "$dest" -a "$sourcefile" -ot "$dest" ]; then return; fi
+	cp -i "$sourcefile" "$destdir"
+}
 
-cp -i integrityd-log.yaml /etc/
-cp -i integrityd-log.py /usr/local/sbin/
-cp -i integrityd-log.service /etc/systemd/system/
+[ -f /etc/integrityd-file.yaml ] || newercp integrityd-file.yaml /etc/
+newercp integrityd-file-checksum.py /usr/local/share/
+newercp integrityd-file.py /usr/local/sbin/
+newercp integrityd-file.service /etc/systemd/system/
+
+[ -f /etc/integrityd-log.yaml ] || newercp integrityd-log.yaml /etc/
+newercp integrityd-log.py /usr/local/sbin/
+newercp integrityd-log.service /etc/systemd/system/
 
