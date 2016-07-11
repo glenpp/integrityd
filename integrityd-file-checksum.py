@@ -20,7 +20,7 @@
 # Since many needed modules are not widely distributed beyond 2.7 yet this
 # part has been separated to allow capabilities in 3.3+ to be used.
 #
-# See: https://www.pitt-pladdy.com/blog/
+# See: https://www.pitt-pladdy.com/blog/_20160711-084204_0100_File_integrity_and_log_anomaly_auditing_Updated_like_fcheck_logcheck_/
 #
 
 

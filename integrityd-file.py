@@ -20,7 +20,7 @@
 # written in Perl. This has been fully redesigned based on the original
 # concepts for the Perl version.
 #
-# See: https://www.pitt-pladdy.com/blog/
+# See: https://www.pitt-pladdy.com/blog/_20160711-084204_0100_File_integrity_and_log_anomaly_auditing_Updated_like_fcheck_logcheck_/
 #
 
 
