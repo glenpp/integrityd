@@ -25,6 +25,8 @@
 
 
 import sys
+reload(sys)
+sys.setdefaultencoding("utf-8")
 import os
 import yaml
 import sqlite3
@@ -189,7 +191,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 					nodenow['Type'] = 'Directory'
 					nodenow['SHA1'] = None
 					below = sorted ( os.listdir ( node['Path'] ) )
-					data = "\n".join ( [ item.encode('utf-8') for item in below ] )
+					data = "\n".join ( below )
 					nodenow['SHA1'] = hashlib.sha1 ( data ).hexdigest()
 					for subnode in below:
 						subpath = os.path.join(node['Path'],subnode)
