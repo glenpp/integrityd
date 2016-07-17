@@ -245,7 +245,6 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 		for path in mtimes:
 			self.dirstate[path] = mtimes[path]
 		for item in filesgone:
-			del self.dirstate[item[0]]
 			del self.rules[item[0]][item[1]]
 
 	# read a log file
