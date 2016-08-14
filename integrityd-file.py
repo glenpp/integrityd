@@ -56,6 +56,9 @@ class filecheck:
 		# we start in fast mode
 		self.fastmode = None
 		self._setfastmode ( True )
+		# track how frequently we sent cycle time info
+		self.nextcycletime = time.time () + config['common']['cycletimeinterval']	# count from startup so we don't report immediately
+		self.fastmodeend = self.nextcycletime	# sane to prevent reporting inline with cycle time
 		# get the database up
 		self.db = sqlite3.connect ( config['common']['database'] )
 		self.db.row_factory = sqlite3.Row
@@ -316,11 +319,24 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 		self.db.commit ();
 
 		# check if we should drop out of fastmode
-		self.dbcur.execute ( 'SELECT MIN(LastChecked) FROM NodeInfo' )
-		if self.fastmode > 0 and self.dbcur.fetchone()['MIN(LastChecked)'] > self.fastmode:
-			self._setfastmode ( False )	# drop out of fastmode
-			self.dbcur.execute ( 'SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo' )
-			syslog.syslog ( 'FastMode Complete with CycleTime = %d' % self.dbcur.fetchone()['CycleTime'] )
+		if self.fastmode > 0:
+			self.dbcur.execute ( 'SELECT MIN(LastChecked) FROM NodeInfo' )
+			if self.dbcur.fetchone()['MIN(LastChecked)'] > self.fastmode:
+				self._setfastmode ( False )	# drop out of fastmode
+				self.dbcur.execute ( 'SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo' )
+				syslog.syslog ( 'FastMode Complete with CycleTime = %d' % self.dbcur.fetchone()['CycleTime'] )
+				# next regular cycle can start from now
+				self.fastmodeend = time.time ()
+				self.nextcycletime = self.fastmodeend + config['common']['cycletimeinterval']
+		elif time.time () >= self.nextcycletime:
+			# check we've cleared the end of the FastMode cycle - only report once we're clear of fastmode
+			self.dbcur.execute ( 'SELECT MIN(LastChecked) FROM NodeInfo' )
+			if self.dbcur.fetchone()['MIN(LastChecked)'] > self.fastmodeend:
+				# regular reporting
+				self.dbcur.execute ( 'SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo' )
+				syslog.syslog ( 'RegularMode CycleTime = %d' % self.dbcur.fetchone()['CycleTime'] )
+				# next cycle
+				self.nextcycletime += config['common']['cycletimeinterval']
 
 
 
@@ -369,6 +385,9 @@ if 'checksumhelper' not in config['common']:
 		if os.path.isfile ( path ):
 			config['common']['checksumhelper'] = path
 			break
+# if not specified in the config, add cycletime interval
+if 'cycletimeinterval' not in config['common']:
+	config['common']['cycletimeinterval'] = 86400	# once every 24 hours
 
 # break up excludes
 excludes = { 'branch': {} }
