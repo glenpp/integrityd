@@ -51,8 +51,8 @@ block = 4096
 #	sys.exit ( "Usage: %s <burst bytes> <byterate / second>\n" % sys.argv[0] )
 #burst = int(sys.argv[1])
 #rate = int(sys.argv[2])
-burst=131072
-rate=262144
+burst=131072.0
+rate=262144.0
 
 
 blockburst = int(burst/block)
@@ -65,9 +65,14 @@ while True:
 		command,value = sys.stdin.readline().rstrip ( "\n" ).split()
 #		sys.stderr.write ( "%s :: %s\n" % (command,value) )
 		if command == 'burst':
-			burst = int(value)
+			burst = float(value)
+			# recalculate
+			blockburst = int(burst/block)
+			bursttime = 1.0 / ( rate / block ) * blockburst
 		elif command == 'byterate':
-			rate = int(value)
+			rate = float(value)
+			# recalculate
+			bursttime = 1.0 / ( rate / block ) * blockburst
 		continue
 	try:
 		starttime = time.time () 
