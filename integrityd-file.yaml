@@ -17,6 +17,8 @@ common:
   filerate: 1
   # what factor to speed up by when changes are detected
   fastmode: 20
+  # report on cycle time every 12 hours (default 24)
+  cycletimeinterval: 43200
 
 
 
