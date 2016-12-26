@@ -40,7 +40,15 @@ import syslog
 import struct
 # see https://www.python.org/dev/peps/pep-3143/#example-usage
 import daemon
-import daemon.pidlockfile
+# this is in different places in different distros
+try:
+	import lockfile.pidlockfile as pidlockfile
+except ImportError, e:
+	if e.args[0] != 'No module named pidlockfile': raise
+try:
+	import daemon.pidlockfile as pidlockfile
+except ImportError, e:
+	if e.args[0] != 'No module named pidlockfile': raise
 
 
 
@@ -433,7 +441,7 @@ if args['init']:
 	syslog.syslog ( 'init complete' )
 else:
 	# regular daemon startup
-	with daemon.DaemonContext( umask=0o077, pidfile=daemon.pidlockfile.PIDLockFile('/run/integrityd-file.pid') ):
+	with daemon.DaemonContext( umask=0o077, pidfile=pidlockfile.PIDLockFile('/run/integrityd-file.pid') ):
 		rundaemon()
 
 
