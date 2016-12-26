@@ -38,7 +38,15 @@ import socket
 import syslog
 # see https://www.python.org/dev/peps/pep-3143/#example-usage
 import daemon
-import daemon.pidlockfile
+# this is in different places in different distros
+try:
+	import lockfile.pidlockfile as pidlockfile
+except ImportError, e:
+	if e.args[0] != 'No module named pidlockfile': raise
+try:
+	import daemon.pidlockfile as pidlockfile
+except ImportError, e:
+	if e.args[0] != 'No module named pidlockfile': raise
 
 
 
@@ -233,19 +241,20 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 						self._readrules ( path, item )
 						if not startup:
 							if item not in self.rules[path]:
-								self._special ( 'New rule file: %s' % os.path.join(path,item) )	# inform
+								self._special ( 'New rule file: %s "%s" "%s"' % (os.path.join(path,item),path,item))	# inform
 							else:
-								self._special ( 'Updated rule file: %s' % os.path.join(path,item) )	# inform
+								self._special ( 'Updated rule file: %s "%s" "%s"' % (os.path.join(path,item),path,item) )	# inform
 			# check and prune non-existing files
 			for item in self.rules[path]:
 				if not os.path.isfile ( os.path.join ( path, item ) ):
 					filesgone.append ( [path,item] )
-					if not startup: self._special ( 'Removed rule file: %s' % os.path.join(path,item) )	# inform
+					if not startup: self._special ( 'Removed rule file: %s "%s" "%s"' % (os.path.join(path,item),path,item) )	# inform
 		# update all dirstates
 		for path in mtimes:
 			self.dirstate[path] = mtimes[path]
 		for item in filesgone:
-			del self.rules[item[0]][item[1]]
+			self._special ( 'Removing rule file: %s "%s" "%s"' % (os.path.join(item[0],item[1]),item[0],item[1]) )	# inform
+			del self.rules[item[0]][item[1]]	# TODO this has a key error
 
 	# read a log file
 	def _readlog ( self, logfile, lastinode, lastposition ):
@@ -467,7 +476,7 @@ def rundaemon():
 	syslog.syslog ( 'exiting' )
 
 # sort out class that actually does the work
-with daemon.DaemonContext( umask=0o077, pidfile=daemon.pidlockfile.PIDLockFile('/run/integrityd-log.pid') ):
+with daemon.DaemonContext( umask=0o077, pidfile=pidlockfile.PIDLockFile('/run/integrityd-log.pid') ):
 	rundaemon()
 #rundaemon()
 
