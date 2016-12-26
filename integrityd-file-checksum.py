@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.4
+#!/usr/bin/env python3
 #    Log Anomaly monitoring and reporting daemon - checksum helper
 #    Copyright (C) 2011,2016  Glen Pitt-Pladdy
 #
