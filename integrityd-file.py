@@ -175,6 +175,19 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 					break
 		return excluded
 				
+	def _checknoinode ( self, path ):
+		parts = path.split ( os.sep )
+		if parts[0] == '': parts.pop ( 0 )
+		ptr = noinodes
+		noinode = False
+		for part in parts:
+			if part in ptr['branch']:
+				ptr = ptr['branch'][part]
+				if ptr['leaf']:
+					noinode = True
+					break
+		return noinode
+
 
 	def _checknode ( self, node ):
 #		print node['Path']
@@ -246,7 +259,10 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 		nodenow['UID'] = stat.st_uid
 		nodenow['GID'] = stat.st_gid
 		nodenow['Links'] = stat.st_nlink
-		nodenow['Inode'] = stat.st_ino
+		if self._checknoinode( node['Path'] ):
+			nodenow['Inode'] = 0	# pretend it's zero on areas with no inodes
+		else:
+			nodenow['Inode'] = stat.st_ino
 		nodenow['Perms'] = '%04o' % stat.st_mode
 		nodenow['CTime'] = int(stat.st_ctime)
 		nodenow['MTime'] = int(stat.st_mtime)
@@ -400,9 +416,9 @@ if 'cycletimeinterval' not in config['common']:
 # break up excludes
 excludes = { 'branch': {} }
 for path in config['filecheck']['exclude']:
-	ptr = excludes
 	parts = path.split ( os.sep )
 	if parts[0] == '': parts.pop ( 0 )
+	ptr = excludes
 	for part in parts:
 		ptr = ptr['branch']
 		if part not in ptr:
@@ -412,6 +428,22 @@ for path in config['filecheck']['exclude']:
 				}
 		ptr = ptr[part]
 	ptr['leaf'] = True
+# break up noinodes
+noinodes = { 'branch': {} }
+for path in config['filecheck']['noinode']:
+	parts = path.split ( os.sep )
+	if parts[0] == '': parts.pop ( 0 )
+	ptr = noinodes
+	for part in parts:
+		ptr = ptr['branch']
+		if part not in ptr:
+			ptr[part] = {
+					'leaf': False,
+					'branch': {},
+				}
+		ptr = ptr[part]
+	ptr['leaf'] = True
+
 
 
 

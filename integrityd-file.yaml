@@ -43,6 +43,9 @@ filecheck:
     - /var/lib/lxc/somecontainer/rootfs/etc/mtab
     - /etc/cups
     - /etc/openvpn/ipp.txt
+  noinode:
+    # this is where filesystems don't have real indoes so they change. We pretned they're all 0
+    - /boot/efi
 
 
 
