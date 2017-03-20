@@ -292,7 +292,12 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 			lastposition = None
 		# we need to seek to the last valid position
 		if lastposition != None:
-			f.seek ( lastposition )
+			if lastposition > os.path.getsize ( logfile ):
+				# assume it's been truncated so start again
+				lastposition = None
+				self._special ( "logfile has been truncated %s" % logfile )
+			else:
+				f.seek ( lastposition )
 		for line in f:
 			if line[-1] != '\n': break
 			lastposition = f.tell ()	# we are only interested in last full line
