@@ -219,7 +219,10 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 #					print line
 #					print pyline
 				# generate the compiled expression
-				rules.append ( re.compile ( pyline ) )
+				try:
+					rules.append ( re.compile ( pyline ) )
+				except re.error, e:
+					self._special ( 'Bad line in "%s" with "%s" ignored: "%s"' % (os.path.join ( path, item ), e.args[0], line) )
 			# all done
 			self.rules[path][item] = rules
 
