@@ -267,7 +267,8 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 		stat = os.fstat ( fd )
 		f = os.fdopen ( fd )
 		if lastinode != None and stat.st_ino != lastinode:
-			self._special ( "logfile has been rotated %s" % logfile )
+			if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
+				self._special ( "logfile has been rotated %s" % logfile )
 			# this is not the same file - presume logs rotated so find previous and finish it up
 			lastlogfile = None
 			for lastfile in os.listdir ( os.path.dirname ( logfile ) ):
@@ -298,7 +299,8 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 			if lastposition > os.path.getsize ( logfile ):
 				# assume it's been truncated so start again
 				lastposition = None
-				self._special ( "logfile has been truncated %s" % logfile )
+				if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
+					self._special ( "logfile has been truncated %s" % logfile )
 			else:
 				f.seek ( lastposition )
 		for line in f:

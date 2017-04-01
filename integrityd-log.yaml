@@ -23,8 +23,13 @@ logcheck:
   basemode: paranoid
 #  localrules: /some/default/
 #  localmode: paranoid
+  # how many seconds between checks for new lines
   checkinterval: 10
+  # how many seconds between checks for new rules
   rulesfreshness: 60
+  # should log rotations be announced
+  logrotationalert: False
+  # individual host configurations
   hosts:
     # reports are ordered by the order of these hosts
     - name: somemachine
