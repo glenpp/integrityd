@@ -28,8 +28,8 @@
 # outputs SHA1 (or NULL) and path on STDOUT
 
 # commands can be sent to set tihngs like burst size and read rate:
-#	send a \n
-#	send the command terminated by \n
+#    send a \n
+#    send the command terminated by \n
 
 
 import sys
@@ -48,11 +48,25 @@ block = 4096
 #sys.stderr.write ( "%s\n" % sys.argv[1] )
 #sys.stderr.write ( "%d\n" % len(sys.argv) )
 #if len(sys.argv) != 3:
-#	sys.exit ( "Usage: %s <burst bytes> <byterate / second>\n" % sys.argv[0] )
+#    sys.exit ( "Usage: %s <burst bytes> <byterate / second>\n" % sys.argv[0] )
 #burst = int(sys.argv[1])
 #rate = int(sys.argv[2])
 burst=131072.0
 rate=262144.0
+
+
+# Caching:
+# This risks filling caches with what we're reading here, displacing potentially higher value items.
+#
+# To work this out trials of FADV options where mode. The lowest option was:
+#   * on opening the file POSIX_FADV_NOREUSE
+#   * before closing the file os.POSIX_FADV_DONTNEED
+#
+# Differences seem small, but this none the less is the lowest cache option consistently in 3 tests
+#
+# See:
+#   man 2 posix_fadvise
+#   https://stackoverflow.com/questions/15266115/read-file-without-disk-caching-in-linux
 
 
 blockburst = int(burst/block)
@@ -60,49 +74,50 @@ bursttime = 1.0 / ( rate / block ) * blockburst
 
 
 while True:
-	node = sys.stdin.readline().rstrip ( "\n" )
-	if node == '':	# command incoming
-		command,value = sys.stdin.readline().rstrip ( "\n" ).split()
-#		sys.stderr.write ( "%s :: %s\n" % (command,value) )
-		if command == 'burst':
-			burst = float(value)
-			# recalculate
-			blockburst = int(burst/block)
-			bursttime = 1.0 / ( rate / block ) * blockburst
-		elif command == 'byterate':
-			rate = float(value)
-			# recalculate
-			bursttime = 1.0 / ( rate / block ) * blockburst
-		continue
-	try:
-		starttime = time.time () 
-		with open ( node, 'rb' ) as f:
-#			os.posix_fadvise ( f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED )	# avoid displacing other items in cache
-			os.posix_fadvise ( f.fileno(), 0, 0, os.POSIX_FADV_NOREUSE )	# avoid displacing other items in cache
-			sha = hashlib.sha1 ()
-			data = ' '
-			blockcount = 0
-			while len(data) > 0:
-				data = f.read ( 4096 )
-				sha.update ( data )
-				blockcount += 1
-				# check on progress
-				if blockcount >= blockburst:
-					now = time.time ()
-					delay = bursttime - ( now - starttime )
-					if delay > 0.0:
-						time.sleep ( delay )
-						starttime += bursttime
-					else:
-						# we're slipping - keep slipping
-						starttime = now
-					blockcount = 0
-					
-					
-#			sys.stderr.write ( "%s\t%s\n" % (sha.hexdigest(),node) )
-			print ( sha.hexdigest(), node )
-			sys.stdout.flush()
-	except FileNotFoundError:
-		print ( "NULL", node )
-		sys.stdout.flush()
+    node = sys.stdin.readline().rstrip ( "\n" )
+    if node == '':    # command incoming
+        command,value = sys.stdin.readline().rstrip ( "\n" ).split()
+#        sys.stderr.write ( "%s :: %s\n" % (command,value) )
+        if command == 'burst':
+            burst = float(value)
+            # recalculate
+            blockburst = int(burst/block)
+            bursttime = 1.0 / ( rate / block ) * blockburst
+        elif command == 'byterate':
+            rate = float(value)
+            # recalculate
+            bursttime = 1.0 / ( rate / block ) * blockburst
+        continue
+    try:
+        starttime = time.time () 
+        with open ( node, 'rb' ) as f:
+            os.posix_fadvise ( f.fileno(), 0, 0, os.POSIX_FADV_NOREUSE )
+            sha = hashlib.sha1 ()
+            data = ' '
+            blockcount = 0
+            while len(data) > 0:
+                data = f.read ( 4096 )
+                sha.update ( data )
+                blockcount += 1
+                # check on progress
+                if blockcount >= blockburst:
+                    now = time.time ()
+                    delay = bursttime - ( now - starttime )
+                    if delay > 0.0:
+                        time.sleep ( delay )
+                        starttime += bursttime
+                    else:
+                        # we're slipping - keep slipping
+                        starttime = now
+                    blockcount = 0
+            os.posix_fadvise ( f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED )
+            f.close()
+                    
+                    
+#            sys.stderr.write ( "%s\t%s\n" % (sha.hexdigest(),node) )
+            print ( sha.hexdigest(), node )
+            sys.stdout.flush()
+    except FileNotFoundError:
+        print ( "NULL", node )
+        sys.stdout.flush()
 
