@@ -13,6 +13,8 @@ common:
   reporttime: 30
   # wait this long after a report before sending again (unless high priority)
   reportholdoff: 900
+  # how long between nagging on errors
+  errornag: 7200
 
 
 
