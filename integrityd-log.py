@@ -267,7 +267,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         try:
             fd = os.open ( logfile, os.O_RDONLY )
         except Exception as e:
-            if logfile in self.lasterror or self.lasterror[logfile] + config['common']['errornag'] > time.time():
+            if logfile not in self.lasterror or self.lasterror[logfile] + config['common']['errornag'] > time.time():
                 self._special("Failed opening logfile %s with: %s" % (logfile, str(e)))
                 # set log repeating limit on this file
                 self.lasterror[logfile] = time.time()
