@@ -113,16 +113,16 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             deleted = len(todelete)
         # add starting records if needed
         for path in config['filecheck']['areas']:
-            self.dbcur.execute ( "SELECT COUNT(*) FROM NodeInfo WHERE Path = ?", [path] )
+            self.dbcur.execute("SELECT COUNT(*) FROM NodeInfo WHERE Path = ?", [path])
             if self.dbcur.fetchone()['COUNT(*)'] == 0:
-                self.dbcur.execute ( "INSERT INTO NodeInfo (Path,LastChecked,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,0,'New',0,0,0,0,0,0)", [path] )
+                self.dbcur.execute("INSERT INTO NodeInfo (Path,LastChecked,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,0,'New',0,0,0,0,0,0)", [path])
         self.db.commit ();
 
     def __del__ ( self ):
         self.checksum.terminate()
         self.checksum.wait()
 
-    def _setfastmode ( self, state ):
+    def _setfastmode(self, state):
         if state != ( self.fastmode > 0 ):
             # state change
             command = "\nburst %d\n" % int(config['common']['burst'])
@@ -158,13 +158,13 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             return out[0]
         except IOError:
             if self.checksum.poll():
-                err = self.checksum.stderr.readline ()
-                syslog.syslog ( 'Checksum Helper Died: %s' % err )
-            raise Exception ( 'Checksum Helper Died' )
+                err = self.checksum.stderr.readline()
+                syslog.syslog('Checksum Helper Died: %s' % err)
+            raise Exception('Checksum Helper Died')
 
-    def _checkexclude ( self, path ):
+    def _checkexclude(self, path):
         parts = path.split ( os.sep )
-        if parts[0] == '': parts.pop ( 0 )
+        if parts[0] == '': parts.pop(0)
         ptr = excludes
         excluded = False
         for part in parts:
@@ -175,53 +175,75 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                     break
         return excluded
                 
-    def _checknoinode ( self, path ):
-        parts = path.split ( os.sep )
-        if parts[0] == '': parts.pop ( 0 )
+    def _checknoinode(self, path):
+        """Check that the path matches an exclusion or object below
+        """
+        parts = path.split(os.sep)
+        if parts[0] == '': parts.pop(0)
         ptr = noinodes
-        noinode = False
+        match = False
         for part in parts:
             if part in ptr['branch']:
                 ptr = ptr['branch'][part]
                 if ptr['leaf']:
-                    noinode = True
+                    match = True
                     break
-        return noinode
+        return match
+
+    def _checknotime(self, path):
+        """Check that the path exactly matches an exclusion
+
+        Unlike others where this needs an exact match so does not apply to objects below the node (directory)
+        """
+        parts = path.split(os.sep)
+        if parts[0] == '': parts.pop(0)
+        ptr = notime
+        match = False
+        while len(parts) > 0:
+            part = parts.pop(0)
+            if part in ptr['branch']:
+                ptr = ptr['branch'][part]
+                if ptr['leaf'] and len(parts) == 0:
+                    match = True
+                    break
+        return match
 
 
-    def _checknode ( self, node ):
+    def _checknode(self, node):
+        """Check one specific node
+        """
 #        print node['Path']
         nodenow = {}
         for field in node.keys(): nodenow[field] = node[field]
         # check exclusion
         if self._checkexclude( node['Path'] ):
-            syslog.syslog ( "remove excluded record: %s" % node['Path'] )
+            syslog.syslog("remove excluded record: %s" % node['Path'])
             # remove from database
-            self.dbcur.execute ( "DELETE FROM NodeInfo WHERE id = ?", [node['id']] )
+            self.dbcur.execute("DELETE FROM NodeInfo WHERE id = ?", [node['id']])
             return
         # inspect element
         try:
-            if os.path.islink ( node['Path'] ):
-                stat = os.lstat ( node['Path'] )
+            if os.path.islink(node['Path']):
+                stat = os.lstat(node['Path'])
                 nodenow['Type'] = 'Symlink'
-                nodenow['LinkDest'] = os.readlink ( node['Path'] )
+                nodenow['LinkDest'] = os.readlink(node['Path'])
                 nodenow['SHA1'] = None
             else:
-                if os.path.isfile ( node['Path'] ):
+                if os.path.isfile(node['Path']):
                     nodenow['Type'] = 'File'
-                    nodenow['SHA1'] = self._sha1file ( nodenow )
+                    nodenow['SHA1'] = self._sha1file(nodenow)
 #                    print nodenow['SHA1']
-                elif os.path.isdir ( node['Path'] ):
+                elif os.path.isdir(node['Path']):
                     nodenow['Type'] = 'Directory'
                     nodenow['SHA1'] = None
-                    below = sorted ( os.listdir ( node['Path'] ) )
+                    below = sorted(os.listdir(node['Path']))
                     data = "\n".join ( below )
-                    nodenow['SHA1'] = hashlib.sha1 ( data ).hexdigest()
+                    nodenow['SHA1'] = hashlib.sha1(data).hexdigest()
                     for subnode in below:
                         subpath = os.path.join(node['Path'],subnode)
-                        if self._checkexclude( subpath ):
+                        if self._checkexclude(subpath):
                             continue    # skip excluded
-                        self.dbcur.execute ( "INSERT OR IGNORE INTO NodeInfo (Path,Parent,LastChecked,ForceCheck,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,?,0,1,'New',0,0,0,0,0,0)", [subpath,nodenow['id']] )
+                        self.dbcur.execute("INSERT OR IGNORE INTO NodeInfo (Path,Parent,LastChecked,ForceCheck,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,?,0,1,'New',0,0,0,0,0,0)", [subpath,nodenow['id']])
                 else:
                     # sockets, pipes, devices etc.
                     # don't read these, but do stat them
@@ -232,17 +254,17 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         except OSError, e:
             # check for deletion (handle)
             if e.strerror == 'No such file or directory':
-                syslog.syslog ( syslog.LOG_WARNING, 'Deleted %s: %s' % ( node['Type'], node['Path'] ) )
+                syslog.syslog(syslog.LOG_WARNING, 'Deleted %s: %s' % ( node['Type'], node['Path']))
                 parents = [ node['id'] ]
                 while len(parents) > 0:
                     todelete = []
                     for parent in parents:
-                        self.dbcur.execute ( 'SELECT id,Path,Type FROM NodeInfo WHERE Parent = ?', [parent] )
+                        self.dbcur.execute('SELECT id,Path,Type FROM NodeInfo WHERE Parent = ?', [parent])
                         for row in self.dbcur:
                             self.reitterate = True    # we have made changes that may impact running list
-                            todelete.append ( row['id'] )
-                            syslog.syslog ( syslog.LOG_WARNING, '+Deleted %s: %s' % ( row['Type'], row['Path'] ) )
-                        self.dbcur.execute ( 'DELETE FROM NodeInfo WHERE id = ?', [parent] )
+                            todelete.append(row['id'])
+                            syslog.syslog(syslog.LOG_WARNING, '+Deleted %s: %s' % ( row['Type'], row['Path']))
+                        self.dbcur.execute('DELETE FROM NodeInfo WHERE id = ?', [parent])
                     parents = todelete
                 return
             etype, evalue, etrace = sys.exc_info()
@@ -259,13 +281,17 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         nodenow['UID'] = stat.st_uid
         nodenow['GID'] = stat.st_gid
         nodenow['Links'] = stat.st_nlink
-        if self._checknoinode( node['Path'] ):
+        if self._checknoinode(node['Path']):
             nodenow['Inode'] = 0    # pretend it's zero on areas with no inodes
         else:
             nodenow['Inode'] = stat.st_ino
         nodenow['Perms'] = '%04o' % stat.st_mode
-        nodenow['CTime'] = int(stat.st_ctime)
-        nodenow['MTime'] = int(stat.st_mtime)
+        if self._checknotime(node['Path']):
+            nodenow['CTime'] = 0    # pretend it's zero on nodes with no times
+            nodenow['MTime'] = 0    # pretend it's zero on nodes with no times
+        else:
+            nodenow['CTime'] = int(stat.st_ctime)
+            nodenow['MTime'] = int(stat.st_mtime)
         nodenow['Size'] = stat.st_size
 #        print nodenow['SHA1']
 
@@ -275,7 +301,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         if node['Type'] == 'New':
             # new node, no need to get into details
             changed = True
-            if not args['init']: syslog.syslog ( syslog.LOG_WARNING, 'New %s: %s' % ( nodenow['Type'], nodenow['Path'] ) )
+            if not args['init']: syslog.syslog(syslog.LOG_WARNING, 'New %s: %s' % (nodenow['Type'], nodenow['Path']))
             changedfields = nodenow.keys()
         else:
             for field in node.keys():
@@ -284,16 +310,16 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                     pass
                 elif nodenow[field] != node[field]:
                         changed = True
-                        changedfields.append ( field )
+                        changedfields.append(field)
             if changed:
-                syslog.syslog ( syslog.LOG_WARNING, 'Changed %s: %s' % ( nodenow['Type'], nodenow['Path'] ) )
-                shortpath = re.sub ( r'^.+?(.{1,20})$', r'... \1', nodenow['Path'] )
+                syslog.syslog(syslog.LOG_WARNING, 'Changed %s: %s' % (nodenow['Type'], nodenow['Path']))
+                shortpath = re.sub(r'^.+?(.{1,20})$', r'... \1', nodenow['Path'])
                 for field in changedfields:
                     if field in ['CTime','MTime']:
-                        syslog.syslog ( syslog.LOG_WARNING, '    %s: %s :: %s => %s' % ( shortpath, field, self._time2str(node[field]), self._time2str(nodenow[field]) ) )
+                        syslog.syslog(syslog.LOG_WARNING, '    %s: %s :: %s => %s' % (shortpath, field, self._time2str(node[field]), self._time2str(nodenow[field])))
                     else:
-                        syslog.syslog ( syslog.LOG_WARNING, '    %s: %s :: %s => %s' % ( shortpath, field, node[field], nodenow[field] ) )
-                syslog.syslog ( syslog.LOG_WARNING, '    %s: LastChecked :: %s' % (shortpath, self._time2str(node['LastChecked'])) )
+                        syslog.syslog(syslog.LOG_WARNING, '    %s: %s :: %s => %s' % (shortpath, field, node[field], nodenow[field]))
+                syslog.syslog(syslog.LOG_WARNING, '    %s: LastChecked :: %s' % (shortpath, self._time2str(node['LastChecked'])))
         if changed:
             # changed and directory, set mustcheck on all subnodes
             if nodenow['Type'] == 'Directory':
@@ -314,17 +340,17 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 
 
     # do a cycle of "number" items
-    def cycle ( self, number ):
+    def cycle(self, number):
         # get nodes for this cycle up to number
         # TODO possibly prioritise directories - a delta there means something in them has changed TODO
-        self.dbcur.execute ( "SELECT * FROM NodeInfo WHERE ForceCheck = 1 LIMIT ?", [number] )
-#        self.dbcur.execute ( "SELECT * FROM NodeInfo WHERE ForceCheck = 1 ORDER BY RANDOM() LIMIT ?", [number] )
+        self.dbcur.execute("SELECT * FROM NodeInfo WHERE ForceCheck = 1 LIMIT ?", [number])
+#        self.dbcur.execute("SELECT * FROM NodeInfo WHERE ForceCheck = 1 ORDER BY RANDOM() LIMIT ?", [number])
         nodes = [ row for row in self.dbcur ]
         if len(nodes) < number:
-            self.dbcur.execute ( "SELECT * FROM NodeInfo ORDER BY LastChecked LIMIT ?", [number-len(nodes)] )
-            for row in self.dbcur: nodes.append ( row )
+            self.dbcur.execute("SELECT * FROM NodeInfo ORDER BY LastChecked LIMIT ?", [number-len(nodes)])
+            for row in self.dbcur: nodes.append(row)
         # randomise order for security (attacker can't mitigate by guessing what's next)
-        random.shuffle ( nodes )
+        random.shuffle(nodes)
 
         # we have our batch - check all the nodes
         for node in nodes:
@@ -344,13 +370,13 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 
         # check if we should drop out of fastmode
         if self.fastmode > 0:
-            self.dbcur.execute ( 'SELECT MIN(LastChecked) FROM NodeInfo' )
+            self.dbcur.execute('SELECT MIN(LastChecked) FROM NodeInfo')
             if self.dbcur.fetchone()['MIN(LastChecked)'] > self.fastmode:
-                self._setfastmode ( False )    # drop out of fastmode
-                self.dbcur.execute ( 'SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo' )
-                syslog.syslog ( 'FastMode Complete with CycleTime = %d' % self.dbcur.fetchone()['CycleTime'] )
+                self._setfastmode(False)    # drop out of fastmode
+                self.dbcur.execute('SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo')
+                syslog.syslog('FastMode Complete with CycleTime = %d' % self.dbcur.fetchone()['CycleTime'])
                 # next regular cycle can start from now
-                self.fastmodeend = time.time ()
+                self.fastmodeend = time.time()
                 self.nextcycletime = self.fastmodeend + config['common']['cycletimeinterval']
         elif time.time () >= self.nextcycletime:
             # check we've cleared the end of the FastMode cycle - only report once we're clear of fastmode
@@ -416,8 +442,9 @@ if 'cycletimeinterval' not in config['common']:
 # break up excludes
 excludes = { 'branch': {} }
 for path in config['filecheck']['exclude']:
-    parts = path.split ( os.sep )
-    if parts[0] == '': parts.pop ( 0 )
+    parts = path.split(os.sep)
+    if parts[0] == '': parts.pop(0)
+    if parts[-1] == '': parts.pop()
     ptr = excludes
     for part in parts:
         ptr = ptr['branch']
@@ -432,8 +459,25 @@ for path in config['filecheck']['exclude']:
 noinodes = { 'branch': {} }
 for path in config['filecheck']['noinode']:
     parts = path.split ( os.sep )
-    if parts[0] == '': parts.pop ( 0 )
+    if parts[0] == '': parts.pop(0)
+    if parts[-1] == '': parts.pop()
     ptr = noinodes
+    for part in parts:
+        ptr = ptr['branch']
+        if part not in ptr:
+            ptr[part] = {
+                    'leaf': False,
+                    'branch': {},
+                }
+        ptr = ptr[part]
+    ptr['leaf'] = True
+# brek up notime
+notime = { 'branch': {} }
+for path in config['filecheck']['notime']:
+    parts = path.split ( os.sep )
+    if parts[0] == '': parts.pop ( 0 )
+    if parts[-1] == '': parts.pop()
+    ptr = notime
     for part in parts:
         ptr = ptr['branch']
         if part not in ptr:
@@ -450,30 +494,30 @@ for path in config['filecheck']['noinode']:
 
 def rundaemon():
     try:
-        syslog.syslog ( 'starting daemon' )
-        check = filecheck ()
-        syslog.syslog ( 'entering loop' )
+        syslog.syslog('starting daemon')
+        check = filecheck()
+        syslog.syslog('entering loop')
         while True:
-            check.cycle ( 100 )
+            check.cycle(100)
     except Exception:    # catch excptions, but not all else we catch daemon terminating
         etype, evalue, etrace = sys.exc_info()
         import traceback
-        syslog.syslog ( syslog.LOG_ERR, 'exception: %s' % '!! '.join ( traceback.format_exception ( etype, evalue, etrace ) ) )
-    syslog.syslog ( 'exiting' )
+        syslog.syslog(syslog.LOG_ERR, 'exception: %s' % '!! '.join(traceback.format_exception(etype, evalue, etrace)))
+    syslog.syslog('exiting')
 
 # sort out class that actually does the work
 if args['init']:
-    syslog.syslog ( 'starting init' )
-    check = filecheck ()
+    syslog.syslog('starting init')
+    check = filecheck()
     newnodes = True
     while check.fastmode > 0 and newnodes:
-        check.cycle ( 100 )
-        check.dbcur.execute ( "SELECT COUNT(*) FROM NodeInfo WHERE Type = 'New'" )
+        check.cycle(100)
+        check.dbcur.execute("SELECT COUNT(*) FROM NodeInfo WHERE Type = 'New'")
         if check.dbcur.fetchone()['COUNT(*)'] == 0: newnodes = False
-    syslog.syslog ( 'init complete' )
+    syslog.syslog('init complete')
 else:
     # regular daemon startup
-    with daemon.DaemonContext( umask=0o077, pidfile=pidlockfile.PIDLockFile('/run/integrityd-file.pid') ):
+    with daemon.DaemonContext(umask=0o077, pidfile=pidlockfile.PIDLockFile('/run/integrityd-file.pid')):
         rundaemon()
 
 

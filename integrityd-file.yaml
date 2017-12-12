@@ -46,6 +46,10 @@ filecheck:
   noinode:
     # this is where filesystems don't have real indoes so they change. We pretned they're all 0
     - /boot/efi
+  notime:
+    # this is nodes that we want to ignore the time on (eg. they get updated with the same data). We pretend they have a time of 0
+    # IMPORTANT: unlike other settings, this specifically applies to the node and NOT objects below the node which also need to be explicitly set
+    - /etc/
 
 
 
