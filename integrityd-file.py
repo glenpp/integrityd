@@ -441,52 +441,55 @@ if 'cycletimeinterval' not in config['common']:
 
 # break up excludes
 excludes = { 'branch': {} }
-for path in config['filecheck']['exclude']:
-    parts = path.split(os.sep)
-    if parts[0] == '': parts.pop(0)
-    if parts[-1] == '': parts.pop()
-    ptr = excludes
-    for part in parts:
-        ptr = ptr['branch']
-        if part not in ptr:
-            ptr[part] = {
-                    'leaf': False,
-                    'branch': {},
-                }
-        ptr = ptr[part]
-    ptr['leaf'] = True
+if 'exclude' in config['filecheck']:
+    for path in config['filecheck']['exclude']:
+        parts = path.split(os.sep)
+        if parts[0] == '': parts.pop(0)
+        if parts[-1] == '': parts.pop()
+        ptr = excludes
+        for part in parts:
+            ptr = ptr['branch']
+            if part not in ptr:
+                ptr[part] = {
+                        'leaf': False,
+                        'branch': {},
+                    }
+            ptr = ptr[part]
+        ptr['leaf'] = True
 # break up noinodes
 noinodes = { 'branch': {} }
-for path in config['filecheck']['noinode']:
-    parts = path.split ( os.sep )
-    if parts[0] == '': parts.pop(0)
-    if parts[-1] == '': parts.pop()
-    ptr = noinodes
-    for part in parts:
-        ptr = ptr['branch']
-        if part not in ptr:
-            ptr[part] = {
-                    'leaf': False,
-                    'branch': {},
-                }
-        ptr = ptr[part]
-    ptr['leaf'] = True
+if 'noinode' in config['filecheck']:
+    for path in config['filecheck']['noinode']:
+        parts = path.split ( os.sep )
+        if parts[0] == '': parts.pop(0)
+        if parts[-1] == '': parts.pop()
+        ptr = noinodes
+        for part in parts:
+            ptr = ptr['branch']
+            if part not in ptr:
+                ptr[part] = {
+                        'leaf': False,
+                        'branch': {},
+                    }
+            ptr = ptr[part]
+        ptr['leaf'] = True
 # brek up notime
 notime = { 'branch': {} }
-for path in config['filecheck']['notime']:
-    parts = path.split ( os.sep )
-    if parts[0] == '': parts.pop ( 0 )
-    if parts[-1] == '': parts.pop()
-    ptr = notime
-    for part in parts:
-        ptr = ptr['branch']
-        if part not in ptr:
-            ptr[part] = {
-                    'leaf': False,
-                    'branch': {},
-                }
-        ptr = ptr[part]
-    ptr['leaf'] = True
+if 'notime' in config['filecheck']:
+    for path in config['filecheck']['notime']:
+        parts = path.split ( os.sep )
+        if parts[0] == '': parts.pop ( 0 )
+        if parts[-1] == '': parts.pop()
+        ptr = notime
+        for part in parts:
+            ptr = ptr['branch']
+            if part not in ptr:
+                ptr[part] = {
+                        'leaf': False,
+                        'branch': {},
+                    }
+            ptr = ptr[part]
+        ptr['leaf'] = True
 
 
 
