@@ -5,8 +5,6 @@
 common:
   # where we keep track of what is going on
   database: /var/local/integrityd-file.sqlite3
-  # checksum helper (python3)
-#  checksumhelper: /path/to/integrityd-file-checksum.py
   # file checing controls
   # how many bytes/second to checksum at
   byterate: 262144
