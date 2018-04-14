@@ -1,57 +1,55 @@
-#!/usr/bin/env python
-#    File Integrity monitoring and logging daemon
-#    Copyright (C) 2011,2016  Glen Pitt-Pladdy
-#
-#    This program is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU General Public License as published by
-#    the Free Software Foundation, either version 3 of the License, or
-#    (at your option) any later version.
-#
-#    This program is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#    GNU General Public License for more details.
-#
-#    You should have received a copy of the GNU General Public License
-#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-#
-#
-# This is a redesigned version of a combined File & Log integrity tool
-# written in Perl. This has been fully redesigned based on the original
-# concepts for the Perl version.
-#
-# See: https://www.pitt-pladdy.com/blog/_20160711-084204_0100_File_integrity_and_log_anomaly_auditing_Updated_like_fcheck_logcheck_/
-#
+#!/usr/bin/env python3
+"""
+    File Integrity monitoring and logging daemon
+    Copyright (C) 2011,2016  Glen Pitt-Pladdy
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+This is a redesigned version of a combined File & Log integrity tool
+written in Perl. This has been fully redesigned based on the original
+concepts for the Perl version.
+
+See: https://www.pitt-pladdy.com/blog/_20160711-084204_0100_File_integrity_and_log_anomaly_auditing_Updated_like_fcheck_logcheck_/
+
+"""
 
 
 import sys
-reload(sys)
-sys.setdefaultencoding("utf-8")
 import os
 import yaml
 import sqlite3
 import time
 import re
 import hashlib
-import subprocess
 import random
-#import socket
 import syslog
-import struct
 # see https://www.python.org/dev/peps/pep-3143/#example-usage
 import daemon
 # this is in different places in different distros
 try:
     import lockfile.pidlockfile as pidlockfile
-except ImportError, e:
+except ImportError as e:
     if e.args[0] != 'No module named pidlockfile': raise
 try:
     import daemon.pidlockfile as pidlockfile
-except ImportError, e:
-    if e.args[0] != 'No module named pidlockfile': raise
+except ImportError as e:
+    if e.args[0] != "No module named 'daemon.pidlockfile'": raise
 
 
 
+DEBUG = False   # if True we run in foreground, console output
 
 
 # main class for tracking node changes
@@ -59,11 +57,14 @@ class filecheck:
     def __init__ ( self ):
         self.lastfiletime = 0
         self.reitterate = False
-        # get the checksum helper (Python 3) up
-        self.checksum = subprocess.Popen ( config['common']['checksumhelper'], bufsize=0, universal_newlines=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE )
+        # checksum properties
+        self.block_size = 4096
+        self.byterate_current = float(config['common']['byterate'])
+        self.block_burst = int(float(config['common']['burst']) / self.block_size)
+        self.burst_time = 1.0 / ( self.byterate_current / self.block_size ) * self.block_burst
         # we start in fast mode
-        self.fastmode = None
-        self._setfastmode ( True )
+        self.fastmode = 0   # start off
+        self._setfastmode(True) # transition to on
         # track how frequently we sent cycle time info
         self.nextcycletime = time.time () + config['common']['cycletimeinterval']    # count from startup so we don't report immediately
         self.fastmodeend = self.nextcycletime    # sane to prevent reporting inline with cycle time
@@ -72,7 +73,7 @@ class filecheck:
         self.db.row_factory = sqlite3.Row
         self.dbcur = self.db.cursor()
         # put the tables in we need (if we need them)
-        self.dbcur.execute ( """
+        self.dbcur.execute("""
 CREATE TABLE IF NOT EXISTS `NodeInfo` (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     Path TEXT NOT NULL UNIQUE,
@@ -90,14 +91,14 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
     Size INT UNSIGNED,
     SHA1 CHAR(40),
     LinkDest TEXT
-)""" )
-        self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS NodeInfo_Path ON NodeInfo(Path)""" )
-        self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS NodeInfo_Path ON NodeInfo(Parent)""" )
-        self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS NodeInfo_LastChecked ON NodeInfo(LastChecked)""" )
-        self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS NodeInfo_ForceCheck ON NodeInfo(ForceCheck)""" )
-        self.db.commit ();
+)""")
+        self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_Path ON NodeInfo(Path)')
+        self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_Path ON NodeInfo(Parent)')
+        self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_LastChecked ON NodeInfo(LastChecked)')
+        self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_ForceCheck ON NodeInfo(ForceCheck)')
+        self.db.commit();
         # make sure the database is not accessible by others
-        os.chmod ( config['common']['database'], 0600 )
+        os.chmod(config['common']['database'], 0o600)
         # remove paths without parents that aren't areas we watch, cycling through to catch all children
         deleted = 1    # make sure we run on the first cycle
         while deleted > 0:
@@ -118,49 +119,70 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                 self.dbcur.execute("INSERT INTO NodeInfo (Path,LastChecked,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,0,'New',0,0,0,0,0,0)", [path])
         self.db.commit ();
 
-    def __del__ ( self ):
-        self.checksum.terminate()
-        self.checksum.wait()
 
     def _setfastmode(self, state):
-        if state != ( self.fastmode > 0 ):
+        if state != ( self.fastmode > 0):
             # state change
-            command = "\nburst %d\n" % int(config['common']['burst'])
             self.filetime = 1.0 / config['common']['filerate']
             if state:
                 self.fastmode = int(time.time())    # this is the epoch when a fast cycle is started - LastChecked after this means cycle complete
-                command += "\nbyterate %d\n" % (int(config['common']['byterate'])*int(config['common']['fastmode']))
+                self.byterate_current = float(config['common']['byterate']) * config['common']['fastmode']
                 self.filetime /= config['common']['fastmode']
             else:
                 self.fastmode = 0    # disabled
-                command += "\nbyterate %d\n" % int(config['common']['byterate'])
-            if command != '':
-                self.checksum.stdin.write ( command )
+                self.byterate_current = float(config['common']['byterate'])
+            self.burst_time = 1.0 / ( self.byterate_current / self.block_size ) * self.block_burst
         elif state:
-            # reset timer
+            # already in fast mode - reset timer
             self.fastmode = int(time.time())    # this is the epoch when a fast cycle is started - LastChecked after this means cycle complete
 
     def _time2str ( self, epoch ):
         return time.strftime ( '%a, %d %b %Y %H:%M:%S %Z', time.localtime ( epoch ) )
 
-    def _sha1file ( self, node ):
-#        print '',node['Path']
+    def _sha1file(self, node):
+        """Checksum a single node (file)
+        """
+        if DEBUG:
+            print("_sha1file({})".format(node))
         try:
-            self.checksum.stdin.write ( "%s\n" % node['Path'] )
-            out = self.checksum.stdout.readline ().rstrip ( '\n' )
-#            print out
-            out = out.split ( ' ', 1 )
-            if out[1] != node['Path']:
-                raise Exception ( 'Mismatched data for: %s' % str(out) )
-            if out[0] == 'NULL': out[0] = None
-#            print out[0]
-#            print '',out[0]
-            return out[0]
-        except IOError:
-            if self.checksum.poll():
-                err = self.checksum.stderr.readline()
-                syslog.syslog('Checksum Helper Died: %s' % err)
-            raise Exception('Checksum Helper Died')
+            starttime = time.time () 
+            with open(node['Path'], 'rb') as f:
+                # Caching:
+                # This risks filling caches with what we're reading here, displacing potentially higher value items.
+                #
+                # To work this out trials of FADV options where mode. The lowest option was:
+                #   * on opening the file POSIX_FADV_NOREUSE
+                #   * before closing the file os.POSIX_FADV_DONTNEED
+                #
+                # Differences seem small, but this none the less is the lowest cache option consistently in 3 tests
+                #
+                # See:
+                #   man 2 posix_fadvise
+                #   https://stackoverflow.com/questions/15266115/read-file-without-disk-caching-in-linux
+                os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_NOREUSE)
+                sha = hashlib.sha1()
+                data = ' '  # we start with something as the "last read" to ensure the loop starts
+                blockcount = 0
+                while len(data) > 0:
+                    data = f.read(self.block_size)
+                    sha.update(data)
+                    blockcount += 1
+                    # check on progress
+                    if blockcount >= self.block_burst:
+                        now = time.time()
+                        delay = self.burst_time - ( now - starttime )
+                        if delay > 0.0:
+                            time.sleep(delay)
+                            starttime += self.burst_time
+                        else:
+                            # we're slipping - keep slipping
+                            starttime = now
+                        blockcount = 0
+                os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+                f.close()
+                return sha.hexdigest()
+        except FileNotFoundError:
+            return None
 
     def _checkexclude(self, path):
         parts = path.split ( os.sep )
@@ -238,7 +260,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                     nodenow['SHA1'] = None
                     below = sorted(os.listdir(node['Path']))
                     data = "\n".join ( below )
-                    nodenow['SHA1'] = hashlib.sha1(data).hexdigest()
+                    nodenow['SHA1'] = hashlib.sha1(data.encode('utf-8')).hexdigest()
                     for subnode in below:
                         subpath = os.path.join(node['Path'],subnode)
                         if self._checkexclude(subpath):
@@ -251,7 +273,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                     nodenow['SHA1'] = None
                 stat = os.stat ( node['Path'] )
                 nodenow['LinkDest'] = None
-        except OSError, e:
+        except OSError as e:
             # check for deletion (handle)
             if e.strerror == 'No such file or directory':
                 syslog.syslog(syslog.LOG_WARNING, 'Deleted %s: %s' % ( node['Type'], node['Path']))
@@ -268,7 +290,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                     parents = todelete
                 return
             etype, evalue, etrace = sys.exc_info()
-            raise etype, evalue, etrace
+            raise (etype, evalue, etrace)
 #            syslog.syslog ( str(dir(e)) )
 #            syslog.syslog ( str(e.filename) )
 #            syslog.syslog ( e.strerror )
@@ -302,7 +324,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             # new node, no need to get into details
             changed = True
             if not args['init']: syslog.syslog(syslog.LOG_WARNING, 'New %s: %s' % (nodenow['Type'], nodenow['Path']))
-            changedfields = nodenow.keys()
+            changedfields = list(nodenow.keys())
         else:
             for field in node.keys():
                 if field in ['Path','Parent','ForceCheck','LastChecked']:
@@ -325,17 +347,18 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             if nodenow['Type'] == 'Directory':
                 self.dbcur.execute ( "UPDATE NodeInfo SET ForceCheck = 1 WHERE Parent = ?", [nodenow['id']] )
         # update database with new data
-        changedfields.append ( 'LastChecked' )
-        if nodenow['ForceCheck'] != node['ForceCheck']: changedfields.append ( 'ForceCheck' )
+        changedfields.append('LastChecked')
+        if nodenow['ForceCheck'] != node['ForceCheck']:
+            changedfields.append ('ForceCheck')
         items = ', '.join ( [ '%s = ?' % field for field in changedfields ] )
         values = [ nodenow[field] for field in changedfields ]
         values.append ( nodenow['id'] )
         self.dbcur.execute ( "UPDATE NodeInfo SET %s WHERE id = ?" % items, values )
         if changed:
             # switch to fastmode if needed
-            self._setfastmode ( True )
+            self._setfastmode(True)
             if self.fastmode == 0:
-                syslog.syslog ( 'FastMode Start' )
+                syslog.syslog('FastMode Start')
 
 
 
@@ -362,10 +385,10 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             delay = self.filetime - ( now - self.lastfiletime )
             self.lastfiletime = self.lastfiletime + self.filetime
             if delay > 0.0:
-                time.sleep ( delay )
+                time.sleep(delay)
             else:
                 self.lastfiletime = now
-            self._checknode ( node )
+            self._checknode(node)
         self.db.commit ();
 
         # check if we should drop out of fastmode
@@ -396,8 +419,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 
 
 # get logging up
-syslog.openlog ( logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON )
-syslog.syslog ( 'Starting up with args: %s' % (str(sys.argv[1:]) if len(sys.argv) > 1 else 'None') )
+syslog.openlog(logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
+syslog.syslog('Starting up with args: {}'.format(str(sys.argv[1:]) if len(sys.argv) > 1 else 'None'))
 
 # arguments - config file, else looks for a few options
 # optional argument of --init doesn't report new files until all known new files are captured, then exits
@@ -407,34 +430,23 @@ if len(sys.argv) > 1:
     for arg in range (1,len(sys.argv)):
         if sys.argv[arg] == '--init':
             args['init'] = True
-            syslog.syslog ( "Started in init mode - changes will not be logged" )
+            syslog.syslog("Started in init mode - changes will not be logged")
         else:
             configfile = sys.argv[arg]
 if configfile == None:
-    if os.path.isfile ( '/etc/integrityd-file.yaml' ):
+    if os.path.isfile('/etc/integrityd-file.yaml'):
         configfile = '/etc/integrityd-file.yaml'
-    elif os.path.isfile ( 'integrityd-file.yaml' ):
+    elif os.path.isfile('integrityd-file.yaml'):
         configfile = 'integrityd-file.yaml'
-syslog.syslog ( 'Using config: %s' % configfile )
+syslog.syslog('Using config: {}'.format(configfile))
 
 if not os.path.isfile ( configfile ):
-    sys.exit ( "FATAL - can't find a config file (might be the command line argument)\n" )
+    sys.exit("FATAL - can't find a config file (might be the command line argument)\n")
 
 # read in conf
-with open ( configfile, 'r' ) as f:
-    config = yaml.load ( f )
-    f.close ()
+with open(configfile, 'rt') as f:
+    config = yaml.load(f)
 
-# if not specified in the config, add checksum helper
-if 'checksumhelper' not in config['common']:
-    paths = [    # where to search
-            os.path.abspath ( os.path.join ( os.path.dirname ( sys.argv[0] ), 'integrityd-file-checksum.py' ) ),
-            '/usr/local/share/integrityd-file-checksum.py',
-        ]
-    for path in paths:
-        if os.path.isfile ( path ):
-            config['common']['checksumhelper'] = path
-            break
 # if not specified in the config, add cycletime interval
 if 'cycletimeinterval' not in config['common']:
     config['common']['cycletimeinterval'] = 86400    # once every 24 hours
@@ -496,6 +508,8 @@ if 'notime' in config['filecheck']:
 
 
 def rundaemon():
+    """main loop with exception logging
+    """
     try:
         syslog.syslog('starting daemon')
         check = filecheck()
@@ -505,23 +519,38 @@ def rundaemon():
     except Exception:    # catch excptions, but not all else we catch daemon terminating
         etype, evalue, etrace = sys.exc_info()
         import traceback
-        syslog.syslog(syslog.LOG_ERR, 'exception: %s' % '!! '.join(traceback.format_exception(etype, evalue, etrace)))
+        syslog.syslog(syslog.LOG_ERR, 'exception: {}'.format('!! '.join(traceback.format_exception(etype, evalue, etrace))))
+        if DEBUG:
+            raise
     syslog.syslog('exiting')
 
-# sort out class that actually does the work
-if args['init']:
-    syslog.syslog('starting init')
-    check = filecheck()
-    newnodes = True
-    while check.fastmode > 0 and newnodes:
-        check.cycle(100)
-        check.dbcur.execute("SELECT COUNT(*) FROM NodeInfo WHERE Type = 'New'")
-        if check.dbcur.fetchone()['COUNT(*)'] == 0: newnodes = False
-    syslog.syslog('init complete')
-else:
-    # regular daemon startup
-    with daemon.DaemonContext(umask=0o077, pidfile=pidlockfile.PIDLockFile('/run/integrityd-file.pid')):
-        rundaemon()
+
+def main():
+    # sort out class that actually does the work
+    if args['init']:
+        syslog.syslog('starting init')
+        check = filecheck()
+        newnodes = True
+        while check.fastmode > 0 and newnodes:
+            check.cycle(100)
+            check.dbcur.execute("SELECT COUNT(*) FROM NodeInfo WHERE Type = 'New'")
+            if check.dbcur.fetchone()['COUNT(*)'] == 0: newnodes = False
+        syslog.syslog('init complete')
+    else:
+        if DEBUG:
+            # foreground
+            rundaemon()
+        else:
+            # normal(daemon)
+            with daemon.DaemonContext(umask=0o077, pidfile=pidlockfile.PIDLockFile('/run/integrityd-file.pid')):
+                rundaemon()
+
+
+
+
+if __name__ == '__main__':
+    main()
+
 
 
 
