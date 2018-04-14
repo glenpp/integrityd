@@ -103,14 +103,14 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         deleted = 1    # make sure we run on the first cycle
         while deleted > 0:
             todelete = []
-            self.dbcur.execute ( "SELECT id,Path FROM NodeInfo WHERE Parent IS NULL" )
+            self.dbcur.execute("SELECT id,Path FROM NodeInfo WHERE Parent IS NULL")
             for row in self.dbcur:
                 if row['Path'] not in config['filecheck']['areas']:
                     todelete.append ( row['id'] )
                     syslog.syslog ( 'Clean up unmonitored path: %s' % row['Path'] )
             for id in todelete:
-                self.dbcur.execute ( "UPDATE NodeInfo SET Parent = NULL WHERE Parent = ?", [id] )
-                self.dbcur.execute ( "DELETE FROM NodeInfo WHERE id = ?", [id] )
+                self.dbcur.execute("UPDATE NodeInfo SET Parent = NULL WHERE Parent = ?", [id])
+                self.dbcur.execute("DELETE FROM NodeInfo WHERE id = ?", [id])
             deleted = len(todelete)
         # add starting records if needed
         for path in config['filecheck']['areas']:

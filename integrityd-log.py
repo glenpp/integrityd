@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS `LogPosition` (
     Inode INT UNSIGNED NOT NULL,
     Position INT UNSIGNED NOT NULL
 )""" )
-        self.dbcur.execute ( """CREATE INDEX IF NOT EXISTS LogPosition_LogFile ON LogPosition(LogFile)""" )
+        self.dbcur.execute("CREATE INDEX IF NOT EXISTS LogPosition_LogFile ON LogPosition(LogFile)")
         self.dbcur.execute ( """
 CREATE TABLE IF NOT EXISTS `LogReport` (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
     Priority CHAR(20) NOT NULL,
     Time INT UNSIGNED NOT NULL DEFAULT 0
 )""" )
-        self.dbcur.execute("""CREATE INDEX IF NOT EXISTS LogReport_Priority ON LogReport(Priority)""")
+        self.dbcur.execute("CREATE INDEX IF NOT EXISTS LogReport_Priority ON LogReport(Priority)")
         self.db.commit()
         # make sure the database is not accessible by others
         os.chmod(config['common']['database'], 0o600)
@@ -359,12 +359,12 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 matching = []
                 for path in self.hosts[host][category]:
                     for rules in self.rules[path].values():
-                        matching.extend ( rules )
+                        matching.extend(rules)
                 ignoring = []
                 for path in self.hosts[host]['{}.ignore'.format(category)]:
                     for rules in self.rules[path].values():
                         ignoring.extend ( rules )
-                report[category][logfile].extend ( self._matchinglines ( ignoring, self._matchinglines ( matching, lines, True ), False ) )
+                report[category][logfile].extend(self._matchinglines(ignoring, self._matchinglines(matching, lines, True), False))
             ignoring = []
             for path in self.hosts[host]['ignore']:
                 for rules in self.rules[path].values():
@@ -396,7 +396,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 
     # log a special message
     def _special ( self, message ):
-        self.dbcur.execute ( 'INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', ['__HOST__','--SPECIAL--',message,'special',int(time.time())] )
+        self.dbcur.execute('INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', ['__HOST__','--SPECIAL--',message,'special',int(time.time())])
         self.db.commit ()
 
     def check_all_logs(self):
@@ -490,9 +490,9 @@ syslog.syslog('Starting up with args: {}'.format(str(sys.argv[1:]) if len(sys.ar
 configfile = None
 if len(sys.argv) > 1:
     configfile = sys.argv[1]
-elif os.path.isfile ( '/etc/integrityd-log.yaml' ):
+elif os.path.isfile('/etc/integrityd-log.yaml'):
     configfile = '/etc/integrityd-log.yaml'
-elif os.path.isfile ( 'integrityd-log.yaml' ):
+elif os.path.isfile('integrityd-log.yaml'):
     configfile = 'integrityd-log.yaml'
 syslog.syslog('Using config: {}'.format(configfile))
 
