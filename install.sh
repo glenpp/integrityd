@@ -9,7 +9,6 @@ newercp () {
 }
 
 [ -f /etc/integrityd-file.yaml ] || newercp integrityd-file.yaml /etc/
-newercp integrityd-file-checksum.py /usr/local/share/
 newercp integrityd-file.py /usr/local/sbin/
 newercp integrityd-file.service /etc/systemd/system/
 
