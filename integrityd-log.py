@@ -305,11 +305,13 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         if lastposition != None:
             if lastposition > os.path.getsize(logfile):
                 # assume it's been truncated so start again
-                lastposition = 0
+                lastposition = None
                 if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
                     self._special("logfile has been truncated {}".format(logfile))
             else:
                 f.seek(lastposition)
+        if lastposition is None:
+            lastposition = 0    # we are starting from the beginning
         for line in f:
             if line[-1] != '\n': break  # we only want complete lines
             lastposition += len(line)   # working around broken tell() in this use case with python3
