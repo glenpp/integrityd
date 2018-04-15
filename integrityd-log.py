@@ -305,7 +305,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         if lastposition != None:
             if lastposition > os.path.getsize(logfile):
                 # assume it's been truncated so start again
-                lastposition = None
+                lastposition = 0
                 if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
                     self._special("logfile has been truncated {}".format(logfile))
             else:
