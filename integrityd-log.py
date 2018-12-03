@@ -262,7 +262,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
             del self.rules[item[0]][item[1]]    # TODO this has a key error
 
     # read a log file
-    def _readlog ( self, logfile, lastinode, lastposition ):
+    def _readlog(self, logfile, lastinode, lastposition):
         lines = []
         # open and read the file
         try:
@@ -274,7 +274,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 self.lasterror[logfile] = time.time()
             return(lastinode, lastposition, lines)
         stat = os.fstat(fd)
-        f = os.fdopen(fd, 'rt')
+        f = os.fdopen(fd, 'rt', errors='ignore')    # ignore encoding errors - we want the data no matter what
         # check it's the same file - ie. rotated and read last lines from before if it has
         if lastinode != None and stat.st_ino != lastinode:
             if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
@@ -284,7 +284,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
             for lastfile in os.listdir(os.path.dirname(logfile)):
                 path = os.path.join(os.path.dirname(logfile), lastfile)
                 if os.path.isfile(path):
-                    laststat = os.stat ( path )
+                    laststat = os.stat(path)
                     if laststat.st_ino == lastinode:
                         lastlogfile = path
                         break
