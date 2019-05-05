@@ -58,29 +58,45 @@ DEBUG = False   # if True we run in foreground, console output
 
 
 
-# generic timer
 class Timer:
+    """Simple timer for semi-regular intervals
+    """
     def __init__(self, interval):
+        """Setup timer
+
+        :arg interval: float, interval in seconds
+        """
         self.interval = interval
         self.next = 0.0
     def timer(self):
+        """Check interval is reached
+
+        :return: True if interval is complete, else False
+        """
         now = time.time()
         if now >= self.next:
             self.next = now + self.interval
             return True
         return False
     def ramaining(self):
+        """Calculate remaining time in interval
+
+        :return: float, remaining time before end of interval
+        """
         return self.next - time.time()
 
 # mailer
-hostname = socket.gethostname()    # used for subjects etc.
+HOSTNAME = socket.gethostname()    # used for subjects etc.
 def mail(subject, lines):
     global config
     if DEBUG:
         print("sending mail")
-    mail = subprocess.Popen([config['common']['mailcommand'], '-s', subject, config['common']['email']], stdin=subprocess.PIPE)
-    out, err = mail.communicate("\n".join(lines).encode('utf-8'))
-    ret = mail.returncode
+    mail_proc = subprocess.Popen(
+        [config['common']['mailcommand'], '-s', subject, config['common']['email']],
+        stdin=subprocess.PIPE
+    )
+    out, err = mail_proc.communicate("\n".join(lines).encode('utf-8'))
+    ret = mail_proc.returncode
     if DEBUG:
         print(out)
         print(err)
@@ -90,6 +106,8 @@ def mail(subject, lines):
 
 
 class LogRules:
+    """Handle log files
+    """
     def __init__(self):
         self.dirstate = {}    # holds last change times of paths we track
         self.rules = {}    # holds paths, files below those and lists of rules in those files
@@ -210,8 +228,8 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 
     # read in a rules file
     def _readrules(self, path, item):
-        with open(os.path.join(path, item), 'rt') as f:
-            lines = f.read().splitlines()
+        with open(os.path.join(path, item), 'rt') as f_rules:
+            lines = f_rules.read().splitlines()
             rules = []
             for line in lines:    # identify comments and blanks
                 if line == '' or line[0] == '#':
@@ -279,15 +297,15 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         lines = []
         # open and read the file
         try:
-            fd = os.open(logfile, os.O_RDONLY)
+            fd_log = os.open(logfile, os.O_RDONLY)
         except Exception as exc:
             if logfile not in self.lasterror or self.lasterror[logfile] + config['common']['errornag'] > time.time():
                 self._special("Failed opening logfile {} with: {}".format(logfile, exc))
                 # set log repeating limit on this file
                 self.lasterror[logfile] = time.time()
             return(lastinode, lastposition, lines)
-        stat = os.fstat(fd)
-        f = os.fdopen(fd, 'rt', errors='ignore')    # ignore encoding errors - we want the data no matter what
+        stat = os.fstat(fd_log)
+        f_log = os.fdopen(fd_log, 'rt', errors='ignore')    # ignore encoding errors - we want the data no matter what
         # check it's the same file - ie. rotated and read last lines from before if it has
         if lastinode != None and stat.st_ino != lastinode:
             if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
@@ -303,11 +321,11 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                         break
             if lastlogfile != None:
                 # we have a valid previous logfile to read
-                lfd = os.open(lastlogfile, os.O_RDONLY)
-                lf = os.fdopen(lfd, 'rt')
+                fd_lastlog = os.open(lastlogfile, os.O_RDONLY)
+                f_lastlog = os.fdopen(fd_lastlog, 'rt')
                 if lastposition != None:
-                    lf.seek(lastposition)
-                for line in lf:
+                    f_lastlog.seek(lastposition)
+                for line in f_lastlog:
                     lines.append(line.rstrip('\n'))
             else:
                 # flag and report this
@@ -322,10 +340,10 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
                     self._special("logfile has been truncated {}".format(logfile))
             else:
-                f.seek(lastposition)
+                f_log.seek(lastposition)
         if lastposition is None:
             lastposition = 0    # we are starting from the beginning
-        for line in f:
+        for line in f_log:
             if line[-1] != '\n':
                 break  # we only want complete lines
             lastposition += len(line)   # working around broken tell() in this use case with python3
@@ -488,10 +506,10 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                     messagelines.append(row['Line'])
         # prepend context
         messagelines.insert(0, '')
-        messagelines.insert(0, 'LogReports from {} on {}:'.format(sys.argv[0], hostname))
+        messagelines.insert(0, 'LogReports from {} on {}:'.format(sys.argv[0], HOSTNAME))
         # TODO put in cycletime at end TODO maybe actually in mail() function
         # send these
-        mail('Log Report for {}'.format(hostname), messagelines)
+        mail('Log Report for {}'.format(HOSTNAME), messagelines)
         # nuke these entries
         self.dbcur.execute('DELETE FROM LogReport')
         self.db.commit()
@@ -520,8 +538,8 @@ if not os.path.isfile(configfile):
     sys.exit("FATAL - can't find a config file (might be the command line argument)\n")
 
 # read in conf
-with open(configfile, 'rt') as f:
-    config = yaml.load(f)
+with open(configfile, 'rt') as f_config:
+    config = yaml.load(f_config)
 
 
 
