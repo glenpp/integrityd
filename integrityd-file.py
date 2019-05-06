@@ -120,6 +120,64 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             if self.dbcur.fetchone()['COUNT(*)'] == 0:
                 self.dbcur.execute("INSERT INTO NodeInfo (Path,LastChecked,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,0,'New',0,0,0,0,0,0)", [path])
         self.db.commit()
+        # break up excludes
+        self.excludes = {'branch': {}}
+        if 'exclude' in config['filecheck']:
+            for path in config['filecheck']['exclude']:
+                parts = path.split(os.sep)
+                if parts[0] == '':
+                    parts.pop(0)
+                if parts[-1] == '':
+                    parts.pop()
+                ptr = self.excludes
+                for part in parts:
+                    ptr = ptr['branch']
+                    if part not in ptr:
+                        ptr[part] = {
+                            'leaf': False,
+                            'branch': {},
+                        }
+                    ptr = ptr[part]
+                ptr['leaf'] = True
+        # break up noinodes
+        self.noinodes = {'branch': {}}
+        if 'noinode' in config['filecheck']:
+            for path in config['filecheck']['noinode']:
+                parts = path.split(os.sep)
+                if parts[0] == '':
+                    parts.pop(0)
+                if parts[-1] == '':
+                    parts.pop()
+                ptr = self.noinodes
+                for part in parts:
+                    ptr = ptr['branch']
+                    if part not in ptr:
+                        ptr[part] = {
+                            'leaf': False,
+                            'branch': {},
+                        }
+                    ptr = ptr[part]
+                ptr['leaf'] = True
+        # brek up notime
+        self.notime = {'branch': {}}
+        if 'notime' in config['filecheck']:
+            for path in config['filecheck']['notime']:
+                parts = path.split(os.sep)
+                if parts[0] == '':
+                    parts.pop(0)
+                if parts[-1] == '':
+                    parts.pop()
+                ptr = self.notime
+                for part in parts:
+                    ptr = ptr['branch']
+                    if part not in ptr:
+                        ptr[part] = {
+                            'leaf': False,
+                            'branch': {},
+                        }
+                    ptr = ptr[part]
+                ptr['leaf'] = True
+
 
 
     def _setfastmode(self, state):
@@ -148,7 +206,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             print("_sha1file({})".format(node))
         try:
             starttime = time.time()
-            with open(node['Path'], 'rb') as f:
+            sha = hashlib.sha1()
+            with open(node['Path'], 'rb') as f_check:
                 # Caching:
                 # This risks filling caches with what we're reading here, displacing potentially higher value items.
                 #
@@ -161,12 +220,11 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                 # See:
                 #   man 2 posix_fadvise
                 #   https://stackoverflow.com/questions/15266115/read-file-without-disk-caching-in-linux
-                os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_NOREUSE)
-                sha = hashlib.sha1()
+                os.posix_fadvise(f_check.fileno(), 0, 0, os.POSIX_FADV_NOREUSE)
                 data = ' '  # we start with something as the "last read" to ensure the loop starts
                 blockcount = 0
                 while data:
-                    data = f.read(self.block_size)
+                    data = f_check.read(self.block_size)
                     sha.update(data)
                     blockcount += 1
                     # check on progress
@@ -180,9 +238,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                             # we're slipping - keep slipping
                             starttime = now
                         blockcount = 0
-                os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-                f.close()
-                return sha.hexdigest()
+                os.posix_fadvise(f_check.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            return sha.hexdigest()
         except FileNotFoundError:
             return None
 
@@ -190,7 +247,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         parts = path.split(os.sep)
         if parts[0] == '':
             parts.pop(0)
-        ptr = excludes
+        ptr = self.excludes
         excluded = False
         for part in parts:
             if part in ptr['branch']:
@@ -206,7 +263,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         parts = path.split(os.sep)
         if parts[0] == '':
             parts.pop(0)
-        ptr = noinodes
+        ptr = self.noinodes
         match = False
         for part in parts:
             if part in ptr['branch']:
@@ -224,7 +281,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         parts = path.split(os.sep)
         if parts[0] == '':
             parts.pop(0)
-        ptr = notime
+        ptr = self.notime
         match = False
         while parts:
             part = parts.pop(0)
@@ -369,8 +426,11 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 
 
 
-    # do a cycle of "number" items
     def cycle(self, number):
+        """Do a cycle of "number" items
+
+        :arg number: int, how many nodes to visit/check in this cycle
+        """
         # get nodes for this cycle up to number
         # TODO possibly prioritise directories - a delta there means something in them has changed TODO
         self.dbcur.execute("SELECT * FROM NodeInfo WHERE ForceCheck = 1 LIMIT ?", [number])
@@ -452,70 +512,12 @@ if not os.path.isfile(configfile):
     sys.exit("FATAL - can't find a config file (might be the command line argument)\n")
 
 # read in conf
-with open(configfile, 'rt') as f:
-    config = yaml.load(f)
+with open(configfile, 'rt') as f_config:
+    config = yaml.load(f_config)
 
 # if not specified in the config, add cycletime interval
 if 'cycletimeinterval' not in config['common']:
     config['common']['cycletimeinterval'] = 86400    # once every 24 hours
-
-# break up excludes
-excludes = {'branch': {}}
-if 'exclude' in config['filecheck']:
-    for path in config['filecheck']['exclude']:
-        parts = path.split(os.sep)
-        if parts[0] == '':
-            parts.pop(0)
-        if parts[-1] == '':
-            parts.pop()
-        ptr = excludes
-        for part in parts:
-            ptr = ptr['branch']
-            if part not in ptr:
-                ptr[part] = {
-                    'leaf': False,
-                    'branch': {},
-                }
-            ptr = ptr[part]
-        ptr['leaf'] = True
-# break up noinodes
-noinodes = {'branch': {}}
-if 'noinode' in config['filecheck']:
-    for path in config['filecheck']['noinode']:
-        parts = path.split(os.sep)
-        if parts[0] == '':
-            parts.pop(0)
-        if parts[-1] == '':
-            parts.pop()
-        ptr = noinodes
-        for part in parts:
-            ptr = ptr['branch']
-            if part not in ptr:
-                ptr[part] = {
-                    'leaf': False,
-                    'branch': {},
-                }
-            ptr = ptr[part]
-        ptr['leaf'] = True
-# brek up notime
-notime = {'branch': {}}
-if 'notime' in config['filecheck']:
-    for path in config['filecheck']['notime']:
-        parts = path.split(os.sep)
-        if parts[0] == '':
-            parts.pop(0)
-        if parts[-1] == '':
-            parts.pop()
-        ptr = notime
-        for part in parts:
-            ptr = ptr['branch']
-            if part not in ptr:
-                ptr[part] = {
-                    'leaf': False,
-                    'branch': {},
-                }
-            ptr = ptr[part]
-        ptr['leaf'] = True
 
 
 
@@ -565,5 +567,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
