@@ -87,8 +87,12 @@ class Timer:
 
 # mailer
 HOSTNAME = socket.gethostname()    # used for subjects etc.
-def mail(subject, lines):
-    global config
+def send_mail(subject, lines):
+    """Send email
+
+    :arg subject: str, subject of email
+    :arg lines:, list, email content as individual lines
+    """
     if DEBUG:
         print("sending mail")
     mail_proc = subprocess.Popen(
@@ -243,10 +247,6 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 pyline = re.sub(r'\[:space:\]', r'\s', pyline)
                 pyline = re.sub(r'\[:upper:\]', 'A-Z', pyline)
                 pyline = re.sub(r'\[:xdigit:\]', '0-9a-fA-F', pyline)
-#                if pyline != line:
-#                    print
-#                    print line
-#                    print pyline
                 # generate the compiled expression
                 try:
                     rules.append(re.compile(pyline))
@@ -292,8 +292,42 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
             self._special('Removing rule file: {} "{}" "{}"'.format(os.path.join(item[0], item[1]), item[0], item[1]))    # inform
             del self.rules[item[0]][item[1]]    # TODO this has a key error
 
-    # read a log file
+
+    def _read_lines(self, fd_log, lines):
+        """Read whole lines from file
+
+        :arg fd_log: file descriptor, this is the open log file
+        :arg lines: list, list to which to append whole log lines (without \n)
+        :return: int, bytes in whole lines
+        """
+        size = 0
+        line_buffer = b''
+        while b'\n' not in line_buffer:
+            chunk = os.read(fd_log, 4096)
+            if not chunk:
+                # eof
+                break
+            line_buffer += chunk
+            while b'\n' in line_buffer:
+                line, line_buffer = line_buffer.split(b'\n', 1)
+                size += len(line) + 1   # include \n in count
+                lines.append(line.decode('utf-8', errors='ignore'))
+                if DEBUG:
+                    print("Read line: {}".format(lines[-1]))
+        return size
+
+
     def _readlog(self, logfile, lastinode, lastposition):
+        """Read a log file, continuing on from previous when rotated
+
+        :arg logfile: str, path to log file
+        :arg lastinode: int, last inode the file was on
+        :arg lastposition: int, last position (for seek) from start of file that was read to
+        :return: tuple of:
+            int, last inode the file was on (may have changed with rotated file)
+            int, last position (for seek) from start of file that was read to
+            list, new lines read from file
+        """
         lines = []
         # open and read the file
         try:
@@ -305,7 +339,6 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 self.lasterror[logfile] = time.time()
             return(lastinode, lastposition, lines)
         stat = os.fstat(fd_log)
-        f_log = os.fdopen(fd_log, 'rt', errors='ignore')    # ignore encoding errors - we want the data no matter what
         # check it's the same file - ie. rotated and read last lines from before if it has
         if lastinode != None and stat.st_ino != lastinode:
             if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
@@ -322,11 +355,10 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
             if lastlogfile != None:
                 # we have a valid previous logfile to read
                 fd_lastlog = os.open(lastlogfile, os.O_RDONLY)
-                f_lastlog = os.fdopen(fd_lastlog, 'rt')
                 if lastposition != None:
-                    f_lastlog.seek(lastposition)
-                for line in f_lastlog:
-                    lines.append(line.rstrip('\n'))
+                    os.lseek(fd_lastlog, lastposition, os.SEEK_SET)
+                self._read_lines(fd_lastlog, lines)
+                os.close(fd_lastlog)
             else:
                 # flag and report this
                 self._special("bad - can't find last logfile against {}".format(logfile))
@@ -340,20 +372,14 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
                     self._special("logfile has been truncated {}".format(logfile))
             else:
-                f_log.seek(lastposition)
+                os.lseek(fd_log, lastposition, os.SEEK_SET)
         if lastposition is None:
             lastposition = 0    # we are starting from the beginning
-        for line in f_log:
-            if line[-1] != '\n':
-                break  # we only want complete lines
-            lastposition += len(line)   # working around broken tell() in this use case with python3
-            lines.append(line.rstrip('\n'))
-            if DEBUG:
-                print("Read line: {}".format(lines[-1]))
+        lastposition += self._read_lines(fd_log, lines)
+        os.close(fd_log)
         lastinode = stat.st_ino
-        if lastposition == None:
-            lastposition = 0    # set position anyway - we don't have one yet
         return lastinode, lastposition, lines
+
 
     def _matchinglines(self, rules, lines, includelines=True):
         """filter lines for matches
@@ -507,9 +533,9 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         # prepend context
         messagelines.insert(0, '')
         messagelines.insert(0, 'LogReports from {} on {}:'.format(sys.argv[0], HOSTNAME))
-        # TODO put in cycletime at end TODO maybe actually in mail() function
+        # TODO put in cycletime at end TODO maybe actually in send_mail() function
         # send these
-        mail('Log Report for {}'.format(HOSTNAME), messagelines)
+        send_mail('Log Report for {}'.format(HOSTNAME), messagelines)
         # nuke these entries
         self.dbcur.execute('DELETE FROM LogReport')
         self.db.commit()
@@ -579,7 +605,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
 
