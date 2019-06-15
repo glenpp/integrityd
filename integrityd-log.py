@@ -347,11 +347,14 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
             lastlogfile = None
             for lastfile in os.listdir(os.path.dirname(logfile)):
                 path = os.path.join(os.path.dirname(logfile), lastfile)
-                if os.path.isfile(path):
+                # files might be changing so be prepared for exceptions
+                try:
                     laststat = os.stat(path)
                     if laststat.st_ino == lastinode:
                         lastlogfile = path
                         break
+                except FileNotFoundError:
+                    pass
             if lastlogfile != None:
                 # we have a valid previous logfile to read
                 fd_lastlog = os.open(lastlogfile, os.O_RDONLY)
