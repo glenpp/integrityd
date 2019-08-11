@@ -244,7 +244,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 pyline = re.sub(r'\[:alpha:\]', 'a-zA-Z', pyline)
                 pyline = re.sub(r'\[:digit:\]', '0-9', pyline)
                 pyline = re.sub(r'\[:lower:\]', 'a-z', pyline)
-                pyline = re.sub(r'\[:space:\]', r'\s', pyline)
+                pyline = re.sub(r'\[:space:\]', r'\\s', pyline)
                 pyline = re.sub(r'\[:upper:\]', 'A-Z', pyline)
                 pyline = re.sub(r'\[:xdigit:\]', '0-9a-fA-F', pyline)
                 # generate the compiled expression
