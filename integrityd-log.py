@@ -34,21 +34,11 @@ import re
 import subprocess
 import random
 import socket
-import syslog
+import signal
+import logging
+import logging.handlers
+import hashlib
 import yaml
-# see https://www.python.org/dev/peps/pep-3143/#example-usage
-import daemon
-# this is in different places in different distros
-try:
-    import lockfile.pidlockfile as pidlockfile
-except ImportError as exc:
-    if exc.args[0] != 'No module named pidlockfile':
-        raise
-try:
-    import daemon.pidlockfile as pidlockfile
-except ImportError as exc:
-    if exc.args[0] != "No module named 'daemon.pidlockfile'":
-        raise
 
 
 
@@ -87,7 +77,7 @@ class Timer:
 
 # mailer
 HOSTNAME = socket.gethostname()    # used for subjects etc.
-def send_mail(subject, lines):
+def send_mail(config, subject, lines):
     """Send email
 
     :arg subject: str, subject of email
@@ -112,19 +102,21 @@ def send_mail(subject, lines):
 class LogRules:
     """Handle log files
     """
-    def __init__(self):
+    def __init__(self, logger, config):
+        self.logger = logger
+        self.config = config
         self.dirstate = {}    # holds last change times of paths we track
         self.rules = {}    # holds paths, files below those and lists of rules in those files
         self.hosts = {}    # holds the host, categories and list of paths relevant to the catoegory
         self.hostorder = ['__HOST__']    # hosts in configuration order (which we send reports in)
         self.logpositions = {}
         self.logfiles = {}    # lists by host
-        self.checktimer = Timer(config['logcheck']['checkinterval'])
-        self.rulesupdatetimer = Timer(config['logcheck']['rulesfreshness'])
+        self.checktimer = Timer(self.config['logcheck']['checkinterval'])
+        self.rulesupdatetimer = Timer(self.config['logcheck']['rulesfreshness'])
         self.holdofftime = 0    # startup with no holdoff
         self.lasterror = {} # the last error we had on a file to avoid excess repeating warnings
         # get the database up
-        self.db = sqlite3.connect(config['common']['database'])
+        self.db = sqlite3.connect(self.config['common']['database'])
         self.db.row_factory = sqlite3.Row
         self.dbcur = self.db.cursor()
         # put the tables in we need (if we need them)
@@ -149,9 +141,9 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         self.dbcur.execute("CREATE INDEX IF NOT EXISTS LogReport_Priority ON LogReport(Priority)")
         self.db.commit()
         # make sure the database is not accessible by others
-        os.chmod(config['common']['database'], 0o600)
+        os.chmod(self.config['common']['database'], 0o600)
         # populate host configs we work against
-        for host in config['logcheck']['hosts']:
+        for host in self.config['logcheck']['hosts']:
             hostconfig = {
                 'cracking': [],
                 'cracking.ignore': [],
@@ -160,10 +152,10 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 'ignore': [],
             }
             # figure out bases we are using
-            basemode = config['logcheck']['basemode']
+            basemode = self.config['logcheck']['basemode']
             if 'basemode' in host:
                 basemode = host['basemode']
-            baserules = config['logcheck']['baserules']
+            baserules = self.config['logcheck']['baserules']
             if 'baserules' in host:
                 baserules = host['baserules']
             # add bases - these have to have the full set of directories
@@ -232,12 +224,21 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 
     # read in a rules file
     def _readrules(self, path, item):
-        with open(os.path.join(path, item), 'rt') as f_rules:
+        """Read in a rules file
+
+        :param path: str, path to rules directory
+        :param item: str, filename of individual file
+        """
+        time_now = int(time.time())
+        file_path = os.path.join(path, item)
+        with open(file_path, 'rt') as f_rules:
             lines = f_rules.read().splitlines()
-            rules = []
-            for line in lines:    # identify comments and blanks
-                if line == '' or line[0] == '#':
+            rules = {}
+            existing_rules = self.rules.get(path, {}).get(item, {})
+            for line_number, line in enumerate(lines):  # identify comments and blanks
+                if not line or line.startswith('#'):
                     continue
+                sha1 = hashlib.sha1((file_path + '\0' + line).encode('utf-8')).hexdigest()
                 # TODO this is a very crude change over for translating perl/grep into python TODO
                 pyline = line
                 pyline = re.sub(r'\[:alnum:\]', 'a-zA-Z0-9', pyline)
@@ -249,9 +250,39 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 pyline = re.sub(r'\[:xdigit:\]', '0-9a-fA-F', pyline)
                 # generate the compiled expression
                 try:
-                    rules.append(re.compile(pyline))
+                    rule = existing_rules.get(
+                        sha1,
+                        {
+                            'count': 0,
+                            'last_used': -1,
+                            'time_added': time_now,
+                        }
+                    )
+                    # always use latest file contents
+                    rule['line_number'] = line_number + 1,    # human number
+                    rule['regex'] = re.compile(pyline)
+                    # sanity check
+                    if rule['regex'].search(''):
+                        # this should not match anything - we have a wildcard line
+                        self._special(
+                            'Bad line {} in "{}" (wildcard?) ignored: "{}"'.format(
+                                line_number + 1,
+                                os.path.join(path, item),
+                                line
+                            )
+                        )
+                        continue
+                    # use it
+                    rules[sha1] = rule
                 except re.error as exc:
-                    self._special('Bad line in "{}" with "{}" ignored: "{}"'.format(os.path.join(path, item), exc.args[0], line))
+                    self._special(
+                        'Bad line {} in "{}" with "{}" ignored: "{}"'.format(
+                            line_number + 1,
+                            os.path.join(path, item),
+                            exc.args[0],
+                            line
+                        )
+                    )
             # all done
             self.rules[path][item] = rules
 
@@ -259,7 +290,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
     def rulesupdate(self, startup=False):
         # we need to check all paths for updates
         mtimes = {}    # new/updated directories
-        filesgone = []    # deleted files to remove from rules after
+        files_gone = []    # deleted files to remove from rules after
         for path in self.dirstate:
             if path not in self.rules:
                 self.rules[path] = {}
@@ -268,27 +299,29 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 continue    # nothing in the directory has changed
             mtimes[path] = mtime    # store to update later
             for item in os.listdir(path):
-                if item[0] == '.':
+                if item.startswith('.'):
                     continue    # skip hidden files
-                if os.path.isfile(os.path.join(path, item)):
-                    if os.path.getmtime(os.path.join(path, item)) >= self.dirstate[path] or item not in self.rules[path]:
-                        # we need to read in this file
-                        self._readrules(path, item)
-                        if not startup:
-                            if item not in self.rules[path]:
-                                self._special('New rule file: {} "{}" "{}"'.format(os.path.join(path, item), path, item))    # inform
-                            else:
-                                self._special('Updated rule file: {} "{}" "{}"'.format(os.path.join(path, item), path, item))    # inform
+                if not os.path.isfile(os.path.join(path, item)):
+                    # we only do files
+                    continue
+                if os.path.getmtime(os.path.join(path, item)) >= self.dirstate[path] or item not in self.rules[path]:
+                    # we need to read in this file
+                    self._readrules(path, item)
+                    if not startup:
+                        if item not in self.rules[path]:
+                            self._special('New rule file: {} "{}" "{}"'.format(os.path.join(path, item), path, item))    # inform
+                        else:
+                            self._special('Updated rule file: {} "{}" "{}"'.format(os.path.join(path, item), path, item))    # inform
             # check and prune non-existing files
             for item in self.rules[path]:
                 if not os.path.isfile(os.path.join(path, item)):
-                    filesgone.append([path, item])
+                    files_gone.append([path, item])
                     if not startup:
                         self._special('Removed rule file: {} "{}" "{}"'.format(os.path.join(path, item), path, item))    # inform
         # update all dirstates
         for path in mtimes:
             self.dirstate[path] = mtimes[path]
-        for item in filesgone:
+        for item in files_gone:
             self._special('Removing rule file: {} "{}" "{}"'.format(os.path.join(item[0], item[1]), item[0], item[1]))    # inform
             del self.rules[item[0]][item[1]]    # TODO this has a key error
 
@@ -333,15 +366,16 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         try:
             fd_log = os.open(logfile, os.O_RDONLY)
         except Exception as exc:
-            if logfile not in self.lasterror or self.lasterror[logfile] + config['common']['errornag'] > time.time():
-                self._special("Failed opening logfile {} with: {}".format(logfile, exc))
+            if logfile not in self.lasterror or self.lasterror[logfile] + self.config['common']['errornag'] > time.time():
+                self.logger.exception("Failed opening logfile: %s", logfile)    # TODO capture any problems for now
+                self._special("Failed opening logfile \"{}\" with: {}".format(logfile, exc))
                 # set log repeating limit on this file
                 self.lasterror[logfile] = time.time()
             return(lastinode, lastposition, lines)
         stat = os.fstat(fd_log)
         # check it's the same file - ie. rotated and read last lines from before if it has
-        if lastinode != None and stat.st_ino != lastinode:
-            if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
+        if lastinode is not None and stat.st_ino != lastinode:
+            if 'logrotationalert' in self.config['logcheck'] and self.config['logcheck']['logrotationalert']:
                 self._special("logfile has been rotated {}".format(logfile))
             # this is not the same file - presume logs rotated so find previous and finish it up
             lastlogfile = None
@@ -368,11 +402,11 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
             # whatever happens, we now have to start again for the current logfile
             lastposition = None
         # we need to seek to the last valid position
-        if lastposition != None:
-            if lastposition > os.path.getsize(logfile):
+        if lastposition is not None:
+            if lastposition > stat.st_size:
                 # assume it's been truncated so start again
                 lastposition = None
-                if 'logrotationalert' in config['logcheck'] and config['logcheck']['logrotationalert']:
+                if 'logrotationalert' in self.config['logcheck'] and self.config['logcheck']['logrotationalert']:
                     self._special("logfile has been truncated {}".format(logfile))
             else:
                 os.lseek(fd_log, lastposition, os.SEEK_SET)
@@ -386,18 +420,31 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 
     def _matchinglines(self, rules, lines, includelines=True):
         """filter lines for matches
+
+        :param rules: list, each item dict containing matching info
+        :param lines: list, log lines to process (each str)
+        :param includelines: bool, return matching lines (else non-matching lines)
+        :return: list, matched lines
         """
+        time_now = int(time.time())
         # TODO this can be optimised by ordering rules by most frequently matched across all contributing files TODO
         outlines = []
-        for line in lines:
-            if includelines:
+        if includelines:
+            # return matching lines
+            for line in lines:
                 for rule in rules:
-                    if rule.search(line):
+                    if rule['regex'].search(line):
                         outlines.append(line)
-            else:
+                        rule['count'] += 1
+                        rule['last_used'] = time_now
+        else:
+            # return non-matching lines
+            for line in lines:
                 includeline = True
                 for rule in rules:
-                    if rule.search(line):
+                    if rule['regex'].search(line):
+                        rule['count'] += 1
+                        rule['last_used'] = time_now
                         includeline = False
                         break
                 if includeline:
@@ -416,7 +463,9 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         for logfile in self.logfiles[host]:
             if logfile not in self.logpositions[host]:
                 self.logpositions[host][logfile] = [None, None, False]
-            lastposition, lastinode, lines = self._readlog(logfile, self.logpositions[host][logfile][0], self.logpositions[host][logfile][1])
+            lastposition, lastinode, lines = self._readlog(logfile,
+                                                           self.logpositions[host][logfile][0],
+                                                           self.logpositions[host][logfile][1])
             if lastposition != self.logpositions[host][logfile][0] or lastinode != self.logpositions[host][logfile][1]:
                 self.logpositions[host][logfile] = [lastposition, lastinode, True]
             # now we need to check these against rules
@@ -425,16 +474,16 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 matching = []
                 for path in self.hosts[host][category]:
                     for rules in self.rules[path].values():
-                        matching.extend(rules)
+                        matching.extend(rules.values())
                 ignoring = []
                 for path in self.hosts[host]['{}.ignore'.format(category)]:
                     for rules in self.rules[path].values():
-                        ignoring.extend(rules)
+                        ignoring.extend(rules.values())
                 report[category][logfile].extend(self._matchinglines(ignoring, self._matchinglines(matching, lines, True), False))
             ignoring = []
             for path in self.hosts[host]['ignore']:
                 for rules in self.rules[path].values():
-                    ignoring.extend(rules)
+                    ignoring.extend(rules.values())
             report['normal'][logfile] = []
             report['normal'][logfile].extend(self._matchinglines(ignoring, lines, False))
         # commit to database
@@ -449,7 +498,6 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         if newlines:
             changed = True
             for line in newlines:
-                print(line)
                 self.dbcur.execute('INSERT INTO LogReport (Host,LogFile,Line,Priority,Time) VALUES (?,?,?,?,?)', line)
         for logfile in self.logpositions[host]:
             if self.logpositions[host][logfile][2]:
@@ -477,8 +525,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
 
         This includes rules updates, log files and mail sending.
         """
-        if DEBUG:
-            print("autocheck()")
+        self.logger.debug("autocheck()")
         # update rules if needed
         if self.rulesupdatetimer.timer():
             self.rulesupdate()
@@ -486,8 +533,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         if not self.checktimer.timer():
             return
         # run full set of logs
-        if DEBUG:
-            print("autocheck() check logs")
+        self.logger.debug("autocheck() check logs")
         self.check_all_logs()
         # check if we need to mail out
         must_send = False
@@ -504,9 +550,9 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         if DEBUG:
             print("autocheck() oldest: {}".format(oldest))
             if oldest != None:
-                print("autocheck() time until reporttime: {}".format(oldest + config['common']['reporttime'] - timenow))
+                print("autocheck() time until reporttime: {}".format(oldest + self.config['common']['reporttime'] - timenow))
                 print("autocheck() time until holdoff: {}".format(self.holdofftime - timenow))
-        if oldest != None and timenow >= oldest + config['common']['reporttime'] and timenow >= self.holdofftime:
+        if oldest != None and timenow >= oldest + self.config['common']['reporttime'] and timenow >= self.holdofftime:
             must_send = True
         # mail out iaf needed
         if must_send:
@@ -538,74 +584,86 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         messagelines.insert(0, 'LogReports from {} on {}:'.format(sys.argv[0], HOSTNAME))
         # TODO put in cycletime at end TODO maybe actually in send_mail() function
         # send these
-        send_mail('Log Report for {}'.format(HOSTNAME), messagelines)
+        send_mail(self.config, 'Log Report for {}'.format(HOSTNAME), messagelines)
         # nuke these entries
         self.dbcur.execute('DELETE FROM LogReport')
         self.db.commit()
         # on send set holdoff timer
-        self.holdofftime = int(time.time()) + config['common']['reportholdoff']
+        self.holdofftime = int(time.time()) + self.config['common']['reportholdoff']
 
 
 
 
 
-# get logging up
-syslog.openlog(logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
-syslog.syslog('Starting up with args: {}'.format(str(sys.argv[1:]) if len(sys.argv) > 1 else 'None'))
-
-# one argument - config file, else looks for a few options
-configfile = None
-if len(sys.argv) > 1:
-    configfile = sys.argv[1]
-elif os.path.isfile('/etc/integrityd-log.yaml'):
-    configfile = '/etc/integrityd-log.yaml'
-elif os.path.isfile('integrityd-log.yaml'):
-    configfile = 'integrityd-log.yaml'
-syslog.syslog('Using config: {}'.format(configfile))
-
-if not os.path.isfile(configfile):
-    sys.exit("FATAL - can't find a config file (might be the command line argument)\n")
-
-# read in conf
-with open(configfile, 'rt') as f_config:
-    config = yaml.load(f_config)
 
 
+class RunDaemon:
+    def __init__(self, logger, config):
+        self.logger = logger
+        self.config = config
+        self.running = True
 
+    def loop(self):
+        try:
+            self.logger.info("starting daemon")
+            rules = LogRules(self.logger, self.config)
+            self.logger.info("entering loop")
+            while self.running:
+                rules.autocheck()
+                time.sleep(5.0 + 2.0 * random.random())
+        except Exception:   # pylint: disable=broad-except
+            self.logger.exception("Exception caught")
 
+    def stop(self, *args):
+        self.running = False
 
-def rundaemon():
-    """main loop with exception logging
-    """
-    try:
-        syslog.syslog('starting daemon')
-        rules = LogRules()
-        syslog.syslog('entering loop')
-        while True:
-            rules.autocheck()
-            time.sleep(5.0 + 2.0 * random.random())
-    except Exception:    # catch excptions, but not all else we catch daemon terminating
-        etype, evalue, etrace = sys.exc_info()
-        import traceback
-        syslog.syslog(syslog.LOG_ERR, 'exception: {}'.format('!! '.join(traceback.format_exception(etype, evalue, etrace))))
-        if DEBUG:
-            raise
-    syslog.syslog('exiting')
 
 
 def main():
-    # sort out class that actually does the work
+    # get logging up
+    logger = logging.getLogger('integrityd-log')
+    log_level = logging.INFO
     if DEBUG:
-        # foreground
-        rundaemon()
-    else:
-        # normal (daemon)
-        with daemon.DaemonContext(umask=0o077, pidfile=pidlockfile.PIDLockFile('/run/integrityd-log.pid')):
-            rundaemon()
+        log_level = logging.DEBUG
+    logger.setLevel(log_level)
+    syslog_handler = logging.handlers.SysLogHandler(
+        address='/dev/log',
+        facility=logging.handlers.SysLogHandler.LOG_DAEMON
+    )
+    syslog_handler.setFormatter(
+        logging.Formatter(
+            # TODO should this depend on debug mode?
+            '%(name)s[%(process)d] [%(levelname)s] %(message)s (%(filename)s:%(lineno)d)'
+        )
+    )
+    syslog_handler.setLevel(log_level)
+    logger.addHandler(syslog_handler)
+    logger.info("Starting up with args: %s", str(sys.argv[1:]) if len(sys.argv) > 1 else 'None')
+
+    # one argument - config file, else looks for a few options
+    configfile = None
+    if len(sys.argv) > 1:
+        configfile = sys.argv[1]
+    elif os.path.isfile('/etc/integrityd-log.yaml'):
+        configfile = '/etc/integrityd-log.yaml'
+    elif os.path.isfile('integrityd-log.yaml'):
+        configfile = 'integrityd-log.yaml'
+    if not os.path.isfile(configfile):
+        logger.error("Can't find a config file (might be the command line argument)")
+        sys.exit("FATAL - can't find a config file (might be the command line argument)\n")
+    # read in conf
+    logger.info("reading config from: %s", configfile)
+    with open(configfile, 'rt') as f_config:
+        config = yaml.load(f_config)
+
+    # with systemd just let it handle things
+    runner = RunDaemon(logger, config)
+    signal.signal(signal.SIGTERM, runner.stop)
+    runner.loop()
+    logger.info("exiting")
 
 
 
 
 if __name__ == '__main__':
     main()
-
