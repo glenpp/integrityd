@@ -31,23 +31,12 @@ import os
 import sqlite3
 import time
 import re
-import hashlib
 import random
-import syslog
+import signal
+import logging
+import logging.handlers
+import hashlib
 import yaml
-# see https://www.python.org/dev/peps/pep-3143/#example-usage
-import daemon
-# this is in different places in different distros
-try:
-    import lockfile.pidlockfile as pidlockfile
-except ImportError as exc:
-    if exc.args[0] != 'No module named pidlockfile':
-        raise
-try:
-    import daemon.pidlockfile as pidlockfile
-except ImportError as exc:
-    if exc.args[0] != "No module named 'daemon.pidlockfile'":
-        raise
 
 
 
@@ -56,7 +45,10 @@ DEBUG = False   # if True we run in foreground, console output
 
 # main class for tracking node changes
 class FileCheck:
-    def __init__(self):
+    def __init__(self, logger, config, init=False):
+        self.logger = logger
+        self.config = config
+        self.init = init
         self.lastfiletime = 0
         self.reitterate = False
         # checksum properties
@@ -71,7 +63,7 @@ class FileCheck:
         self.nextcycletime = time.time() + config['common']['cycletimeinterval']    # count from startup so we don't report immediately
         self.fastmodeend = self.nextcycletime    # sane to prevent reporting inline with cycle time
         # get the database up
-        self.db = sqlite3.connect(config['common']['database'])
+        self.db = sqlite3.connect(self.config['common']['database'])
         self.db.row_factory = sqlite3.Row
         self.dbcur = self.db.cursor()
         # put the tables in we need (if we need them)
@@ -100,30 +92,30 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_ForceCheck ON NodeInfo(ForceCheck)')
         self.db.commit()
         # make sure the database is not accessible by others
-        os.chmod(config['common']['database'], 0o600)
+        os.chmod(self.config['common']['database'], 0o600)
         # remove paths without parents that aren't areas we watch, cycling through to catch all children
         deleted = 1    # make sure we run on the first cycle
         while deleted > 0:
             todelete = []
             self.dbcur.execute("SELECT id,Path FROM NodeInfo WHERE Parent IS NULL")
             for row in self.dbcur:
-                if row['Path'] not in config['filecheck']['areas']:
+                if row['Path'] not in self.config['filecheck']['areas']:
                     todelete.append(row['id'])
-                    syslog.syslog('Clean up unmonitored path: {}'.format(row['Path']))
+                    self.logger.info('Clean up unmonitored path: {}'.format(row['Path']))
             for rowid in todelete:
                 self.dbcur.execute("UPDATE NodeInfo SET Parent = NULL WHERE Parent = ?", [rowid])
                 self.dbcur.execute("DELETE FROM NodeInfo WHERE id = ?", [rowid])
             deleted = len(todelete)
         # add starting records if needed
-        for path in config['filecheck']['areas']:
+        for path in self.config['filecheck']['areas']:
             self.dbcur.execute("SELECT COUNT(*) FROM NodeInfo WHERE Path = ?", [path])
             if self.dbcur.fetchone()['COUNT(*)'] == 0:
                 self.dbcur.execute("INSERT INTO NodeInfo (Path,LastChecked,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,0,'New',0,0,0,0,0,0)", [path])
         self.db.commit()
         # break up excludes
         self.excludes = {'branch': {}}
-        if 'exclude' in config['filecheck']:
-            for path in config['filecheck']['exclude']:
+        if 'exclude' in self.config['filecheck']:
+            for path in self.config['filecheck']['exclude']:
                 parts = path.split(os.sep)
                 if parts[0] == '':
                     parts.pop(0)
@@ -141,8 +133,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                 ptr['leaf'] = True
         # break up noinodes
         self.noinodes = {'branch': {}}
-        if 'noinode' in config['filecheck']:
-            for path in config['filecheck']['noinode']:
+        if 'noinode' in self.config['filecheck']:
+            for path in self.config['filecheck']['noinode']:
                 parts = path.split(os.sep)
                 if parts[0] == '':
                     parts.pop(0)
@@ -160,8 +152,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                 ptr['leaf'] = True
         # brek up notime
         self.notime = {'branch': {}}
-        if 'notime' in config['filecheck']:
-            for path in config['filecheck']['notime']:
+        if 'notime' in self.config['filecheck']:
+            for path in self.config['filecheck']['notime']:
                 parts = path.split(os.sep)
                 if parts[0] == '':
                     parts.pop(0)
@@ -183,14 +175,14 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
     def _setfastmode(self, state):
         if state != (self.fastmode > 0):
             # state change
-            self.filetime = 1.0 / config['common']['filerate']
+            self.filetime = 1.0 / self.config['common']['filerate']
             if state:
                 self.fastmode = int(time.time())    # this is the epoch when a fast cycle is started - LastChecked after this means cycle complete
-                self.byterate_current = float(config['common']['byterate']) * config['common']['fastmode']
-                self.filetime /= config['common']['fastmode']
+                self.byterate_current = float(self.config['common']['byterate']) * self.config['common']['fastmode']
+                self.filetime /= self.config['common']['fastmode']
             else:
                 self.fastmode = 0    # disabled
-                self.byterate_current = float(config['common']['byterate'])
+                self.byterate_current = float(self.config['common']['byterate'])
             self.burst_time = 1.0 / (self.byterate_current / self.block_size) * self.block_burst
         elif state:
             # already in fast mode - reset timer
@@ -302,7 +294,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             nodenow[field] = node[field]
         # check exclusion
         if self._checkexclude(node['Path']):
-            syslog.syslog("remove excluded record: {}".format(node['Path']))
+            self.logger.info("remove excluded record: {}".format(node['Path']))
             # remove from database
             self.dbcur.execute("DELETE FROM NodeInfo WHERE id = ?", [node['id']])
             return
@@ -339,7 +331,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         except (OSError, NotADirectoryError) as exc:
             # check for deletion (handle it)
             if exc.strerror in ['No such file or directory', 'Not a directory']:
-                syslog.syslog(syslog.LOG_WARNING, 'Deleted {}: {}'.format(node['Type'], node['Path']))
+                self.logger.warning('Deleted {}: {}'.format(node['Type'], node['Path']))
                 parents = [node['id']]
                 while parents:
                     todelete = []
@@ -348,17 +340,12 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                         for row in self.dbcur:
                             self.reitterate = True    # we have made changes that may impact running list
                             todelete.append(row['id'])
-                            syslog.syslog(syslog.LOG_WARNING, '+Deleted {}: {}'.format(row['Type'], row['Path']))
+                            self.logger.warning('+Deleted {}: {}'.format(row['Type'], row['Path']))
                         self.dbcur.execute('DELETE FROM NodeInfo WHERE id = ?', [parent])
                     parents = todelete
                 return
             # not handled message - re-raise
             raise exc
-#            syslog.syslog ( str(dir(e)) )
-#            syslog.syslog ( str(e.filename) )
-#            syslog.syslog ( e.strerror )
-#            syslog.syslog ( str([etype,evalue]) )
-#            syslog.syslog ( "----" )
 #            return
 #        nodenow['Parent'] = No Change
         nodenow['LastChecked'] = int(time.time())
@@ -386,8 +373,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         if node['Type'] == 'New':
             # new node, no need to get into details
             changed = True
-            if not args['init']:
-                syslog.syslog(syslog.LOG_WARNING, 'New {}: {}'.format(nodenow['Type'], nodenow['Path']))
+            if not self.init:
+                self.logger.warning('New {}: {}'.format(nodenow['Type'], nodenow['Path']))
             changedfields = list(nodenow.keys())
         else:
             for field in node.keys():
@@ -398,14 +385,14 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                     changed = True
                     changedfields.append(field)
             if changed:
-                syslog.syslog(syslog.LOG_WARNING, 'Changed {}: {}'.format(nodenow['Type'], nodenow['Path']))
+                self.logger.warning('Changed {}: {}'.format(nodenow['Type'], nodenow['Path']))
                 shortpath = re.sub(r'^.+?(.{1,20})$', r'... \1', nodenow['Path'])
                 for field in changedfields:
                     if field in ['CTime', 'MTime']:
-                        syslog.syslog(syslog.LOG_WARNING, '    {}: {} :: {} => {}'.format(shortpath, field, self._time2str(node[field]), self._time2str(nodenow[field])))
+                        self.logger.warning('    {}: {} :: {} => {}'.format(shortpath, field, self._time2str(node[field]), self._time2str(nodenow[field])))
                     else:
-                        syslog.syslog(syslog.LOG_WARNING, '    {}: {} :: {} => {}'.format(shortpath, field, node[field], nodenow[field]))
-                syslog.syslog(syslog.LOG_WARNING, '    {}: LastChecked :: {}'.format(shortpath, self._time2str(node['LastChecked'])))
+                        self.logger.warning('    {}: {} :: {} => {}'.format(shortpath, field, node[field], nodenow[field]))
+                self.logger.warning('    {}: LastChecked :: {}'.format(shortpath, self._time2str(node['LastChecked'])))
         if changed:
             # changed and directory, set mustcheck on all subnodes
             if nodenow['Type'] == 'Directory':
@@ -422,7 +409,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             # switch to fastmode if needed
             self._setfastmode(True)
             if self.fastmode == 0:
-                syslog.syslog('FastMode Start')
+                self.logger.info('FastMode Start')
 
 
 
@@ -465,106 +452,117 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
             if self.dbcur.fetchone()['MIN(LastChecked)'] > self.fastmode:
                 self._setfastmode(False)    # drop out of fastmode
                 self.dbcur.execute('SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo')
-                syslog.syslog('FastMode Complete with CycleTime = {:d}'.format(self.dbcur.fetchone()['CycleTime']))
+                self.logger.info('FastMode Complete with CycleTime = {:d}'.format(self.dbcur.fetchone()['CycleTime']))
                 # next regular cycle can start from now
                 self.fastmodeend = time.time()
-                self.nextcycletime = self.fastmodeend + config['common']['cycletimeinterval']
+                self.nextcycletime = self.fastmodeend + self.config['common']['cycletimeinterval']
         elif time.time() >= self.nextcycletime:
             # check we've cleared the end of the FastMode cycle - only report once we're clear of fastmode
             self.dbcur.execute('SELECT MIN(LastChecked) FROM NodeInfo')
             if self.dbcur.fetchone()['MIN(LastChecked)'] > self.fastmodeend:
                 # regular reporting
                 self.dbcur.execute('SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo')
-                syslog.syslog('RegularMode CycleTime = %d' % self.dbcur.fetchone()['CycleTime'])
+                self.logger.info('RegularMode CycleTime = %d' % self.dbcur.fetchone()['CycleTime'])
                 # next cycle
-                self.nextcycletime += config['common']['cycletimeinterval']
+                self.nextcycletime += self.config['common']['cycletimeinterval']
 
 
 
 
 
 
+class RunDaemon:
+    def __init__(self, logger, config):
+        self.logger = logger
+        self.config = config
+        self.running = True
 
+    def loop(self):
+        try:
+            self.logger.info("starting daemon")
+            check = FileCheck(self.logger, self.config)
+            self.logger.info("entering loop")
+            while self.running:
+                check.cycle(100)
+        except Exception:   # pylint: disable=broad-except
+            self.logger.exception("Exception caught")
 
-# get logging up
-syslog.openlog(logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
-syslog.syslog('Starting up with args: {}'.format(str(sys.argv[1:]) if len(sys.argv) > 1 else 'None'))
+    def stop(self, *args):
+        self.running = False
 
-# arguments - config file, else looks for a few options
-# optional argument of --init doesn't report new files until all known new files are captured, then exits
-args = {'init': False}
-configfile = None
-if len(sys.argv) > 1:
-    for arg in range(1, len(sys.argv)):
-        if sys.argv[arg] == '--init':
-            args['init'] = True
-            syslog.syslog("Started in init mode - changes will not be logged")
-        else:
-            configfile = sys.argv[arg]
-if configfile is None:
-    if os.path.isfile('/etc/integrityd-file.yaml'):
-        configfile = '/etc/integrityd-file.yaml'
-    elif os.path.isfile('integrityd-file.yaml'):
-        configfile = 'integrityd-file.yaml'
-syslog.syslog('Using config: {}'.format(configfile))
-
-if not os.path.isfile(configfile):
-    sys.exit("FATAL - can't find a config file (might be the command line argument)\n")
-
-# read in conf
-with open(configfile, 'rt') as f_config:
-    config = yaml.load(f_config)
-
-# if not specified in the config, add cycletime interval
-if 'cycletimeinterval' not in config['common']:
-    config['common']['cycletimeinterval'] = 86400    # once every 24 hours
-
-
-
-
-
-def rundaemon():
-    """main loop with exception logging
-    """
-    try:
-        syslog.syslog('starting daemon')
-        check = FileCheck()
-        syslog.syslog('entering loop')
-        while True:
-            check.cycle(100)
-    except Exception:    # catch excptions, but not all else we catch daemon terminating
-        etype, evalue, etrace = sys.exc_info()
-        import traceback
-        syslog.syslog(syslog.LOG_ERR, 'exception: {}'.format('!! '.join(traceback.format_exception(etype, evalue, etrace))))
-        if DEBUG:
-            raise
-    syslog.syslog('exiting')
 
 
 def main():
+    # get logging up
+    logger = logging.getLogger('integrityd-log')
+    log_level = logging.INFO
+    if DEBUG:
+        log_level = logging.DEBUG
+    logger.setLevel(log_level)
+    syslog_handler = logging.handlers.SysLogHandler(
+        address='/dev/log',
+        facility=logging.handlers.SysLogHandler.LOG_DAEMON
+    )
+    syslog_handler.setFormatter(
+        logging.Formatter(
+            # TODO should this depend on debug mode?
+            '%(name)s[%(process)d] [%(levelname)s] %(message)s (%(filename)s:%(lineno)d)'
+        )
+    )
+    syslog_handler.setLevel(log_level)
+    logger.addHandler(syslog_handler)
+    logger.info("Starting up with args: %s", str(sys.argv[1:]) if len(sys.argv) > 1 else 'None')
+
+
+    # arguments - config file, else looks for a few options
+    # optional argument of --init doesn't report new files until all known new files are captured, then exits
+    args = {'init': False}
+    configfile = None
+    if len(sys.argv) > 1:
+        for arg in range(1, len(sys.argv)):
+            if sys.argv[arg] == '--init':
+                args['init'] = True
+                logger.info("Started in init mode - changes will not be logged")
+            else:
+                configfile = sys.argv[arg]
+    if configfile is None:
+        if os.path.isfile('/etc/integrityd-file.yaml'):
+            configfile = '/etc/integrityd-file.yaml'
+        elif os.path.isfile('integrityd-file.yaml'):
+            configfile = 'integrityd-file.yaml'
+    if not os.path.isfile(configfile):
+        logger.error("Can't find a config file (might be the command line argument)")
+        sys.exit("FATAL - can't find a config file (might be the command line argument)\n")
+    # read in conf
+    logger.info("reading config from: %s", configfile)
+    with open(configfile, 'rt') as f_config:
+        config = yaml.load(f_config)
+
+    # if not specified in the config, add cycletime interval
+    if 'cycletimeinterval' not in config['common']:
+        config['common']['cycletimeinterval'] = 86400    # once every 24 hours
+
+
     # sort out class that actually does the work
     if args['init']:
-        syslog.syslog('starting init')
-        check = FileCheck()
+        logger.info('starting init')
+        check = FileCheck(logger, config)
         newnodes = True
         while check.fastmode > 0 and newnodes:
             check.cycle(100)
             check.dbcur.execute("SELECT COUNT(*) FROM NodeInfo WHERE Type = 'New'")
             if check.dbcur.fetchone()['COUNT(*)'] == 0:
                 newnodes = False
-        syslog.syslog('init complete')
+        logger.info('init complete')
     else:
-        if DEBUG:
-            # foreground
-            rundaemon()
-        else:
-            # normal(daemon)
-            with daemon.DaemonContext(umask=0o077, pidfile=pidlockfile.PIDLockFile('/run/integrityd-file.pid')):
-                rundaemon()
+        # with systemd just let it handle things
+        runner = RunDaemon(logger, config)
+        signal.signal(signal.SIGTERM, runner.stop)
+        runner.loop()
+        logger.info("exiting")
 
 
 
 
 if __name__ == '__main__':
     main()
-
