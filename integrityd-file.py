@@ -494,7 +494,7 @@ class RunDaemon:
 
 def main():
     # get logging up
-    logger = logging.getLogger('integrityd-log')
+    logger = logging.getLogger('integrityd-file')
     log_level = logging.INFO
     if DEBUG:
         log_level = logging.DEBUG
