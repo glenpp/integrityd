@@ -49,8 +49,10 @@ class FileCheck:
         self.logger = logger
         self.config = config
         self.init = init
-        self.lastfiletime = 0
+        self.file_target_time = 0   # time when next file should be processed
+        self.per_file_time = None   # set by _setfastmode()
         self.reitterate = False
+        self._running = False
         # checksum properties
         self.block_size = 4096
         self.byterate_current = float(config['common']['byterate'])
@@ -175,11 +177,11 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
     def _setfastmode(self, state):
         if state != (self.fastmode > 0):
             # state change
-            self.filetime = 1.0 / self.config['common']['filerate']
+            self.per_file_time = 1.0 / self.config['common']['filerate']
             if state:
                 self.fastmode = int(time.time())    # this is the epoch when a fast cycle is started - LastChecked after this means cycle complete
                 self.byterate_current = float(self.config['common']['byterate']) * self.config['common']['fastmode']
-                self.filetime /= self.config['common']['fastmode']
+                self.per_file_time /= self.config['common']['fastmode']
             else:
                 self.fastmode = 0    # disabled
                 self.byterate_current = float(self.config['common']['byterate'])
@@ -420,6 +422,7 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         """
         # get nodes for this cycle up to number
         # TODO possibly prioritise directories - a delta there means something in them has changed TODO
+        self._running = True
         self.dbcur.execute("SELECT * FROM NodeInfo WHERE ForceCheck = 1 LIMIT ?", [number])
 #        self.dbcur.execute("SELECT * FROM NodeInfo WHERE ForceCheck = 1 ORDER BY RANDOM() LIMIT ?", [number])
         nodes = [row for row in self.dbcur]
@@ -437,12 +440,16 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                 self.reitterate = False
                 break
             now = time.time()
-            delay = self.filetime - (now - self.lastfiletime)
-            self.lastfiletime = self.lastfiletime + self.filetime
-            if delay > 0.0:
+            self.file_target_time = max(now, self.file_target_time + self.per_file_time) # for this (next) file
+            # delay in small steps to allow for clean stop
+            while self._running:
+                delay = min(1.0, self.file_target_time -  time.time())
+                if delay <= 0.0:
+                    break
                 time.sleep(delay)
-            else:
-                self.lastfiletime = now
+            if not self._running:
+                # end loop if we are stopping
+                break
             self._checknode(node)
         self.db.commit()
 
@@ -467,6 +474,9 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                 self.nextcycletime += self.config['common']['cycletimeinterval']
 
 
+    def stop(self):
+        # allow loops to exit cleanly
+        self._running = False
 
 
 
@@ -475,19 +485,21 @@ class RunDaemon:
     def __init__(self, logger, config):
         self.logger = logger
         self.config = config
+        self.check = None
         self.running = True
 
     def loop(self):
         try:
             self.logger.info("starting daemon")
-            check = FileCheck(self.logger, self.config)
+            self.check = FileCheck(self.logger, self.config)
             self.logger.info("entering loop")
             while self.running:
-                check.cycle(100)
+                self.check.cycle(100)
         except Exception:   # pylint: disable=broad-except
             self.logger.exception("Exception caught")
 
-    def stop(self, *args):
+    def stop(self, *_):
+        self.check.stop()
         self.running = False
 
 
