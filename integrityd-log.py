@@ -378,7 +378,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                             os.path.join(path, item),
                             report_stats['line_number'],
                             sha1,
-                            time.strftime('%Y-%m-%d', report_stats['time_added']),
+                            time.strftime('%Y-%m-%d', time.localtime(report_stats['time_added'])),
                         )
 
 
