@@ -518,7 +518,7 @@ def main():
     syslog_handler.setFormatter(
         logging.Formatter(
             # TODO should this depend on debug mode?
-            '%(name)s[%(process)d] [%(levelname)s] %(message)s (%(filename)s:%(lineno)d)'
+            '%(name)s[%(process)d]: [%(levelname)s] %(message)s (%(filename)s:%(lineno)d)'
         )
     )
     syslog_handler.setLevel(log_level)
