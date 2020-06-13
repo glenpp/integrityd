@@ -15,18 +15,18 @@ common:
   reportholdoff: 900
   # how long between nagging on errors
   errornag: 7200
-  
-  # TODO working things out
+  # optionally, report on unused rules
   # how long before considering a rule unused (days)
   # 0, null, or missing key disables reporting unused rules
   report_unused_rules_days: 3
+  # optionally, report periodically, else on shutdown
   # how long between reporting cycle of unused rules (days)
   # 0, null, or missing key disables reporting cycle
   # this will happen anyway at shutdown even if reporting cycle is disabled
   report_unused_cycle_days: 2
-  # we might want to exclude some rules files from reporting - supports globs
+  # optionally, exclude to exclude some rules files from reporting - supports globs
   unused_rules_ignore:
-    - /etc/integrityd/logrules-somemachine/common-shared-stuff
+    - /etc/integrityd/logrules-somemachine/common-shared-stuff-*
     - /etc/integrityd/logrules-*/common-across-hosts
 
 
