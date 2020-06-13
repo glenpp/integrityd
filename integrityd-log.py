@@ -38,6 +38,7 @@ import signal
 import logging
 import logging.handlers
 import hashlib
+import fnmatch
 import yaml
 
 
@@ -115,6 +116,13 @@ class LogRules:
         self.rulesupdatetimer = Timer(self.config['logcheck']['rulesfreshness'])
         self.holdofftime = 0    # startup with no holdoff
         self.lasterror = {} # the last error we had on a file to avoid excess repeating warnings
+        # unused rule reporting cycle
+        report_unused_cycle = self.config['common'].get('report_unused_cycle_days')
+        self.unused_report_timer = None
+        if report_unused_cycle:
+            report_unused_cycle *= 86400    # in seconds
+            self.unused_report_timer = Timer(report_unused_cycle)
+            self.unused_report_timer.timer()    # avoid triggering on first cycle
         # get the database up
         self.db = sqlite3.connect(self.config['common']['database'])
         self.db.row_factory = sqlite3.Row
@@ -139,6 +147,26 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
     Time INT UNSIGNED NOT NULL DEFAULT 0
 )""")
         self.dbcur.execute("CREATE INDEX IF NOT EXISTS LogReport_Priority ON LogReport(Priority)")
+        # track usage of indiviual rules
+        self.dbcur.execute("""
+CREATE TABLE IF NOT EXISTS `RulesStatsFiles` (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    RulesPath TEXT NOT NULL,
+    RulesFilename TEXT NOT NULL
+)""")
+        self.dbcur.execute("CREATE UNIQUE INDEX IF NOT EXISTS RulesStatsFiles_path ON RulesStatsFiles(RulesPath, RulesFilename)")
+        self.dbcur.execute("""
+CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    RulesStatsFile_id INT UNSIGNED NOT NULL,
+    LineSHA1 CHAR(40) NOT NULL,
+    LineNum INT UNSIGNED NOT NULL,
+    Added INT UNSIGNED NOT NULL,
+    MatchedLast INT UNSIGNED,
+    MatchedCount INT UNSIGNED NOT NULL,
+    FOREIGN KEY(RulesStatsFile_id) REFERENCES RulesStatsFiles(id)
+)""")
+        self.dbcur.execute("CREATE UNIQUE INDEX IF NOT EXISTS RulesStatsLines_sha1 ON RulesStatsLines(RulesStatsFile_id, LineSHA1)")
         self.db.commit()
         # make sure the database is not accessible by others
         os.chmod(self.config['common']['database'], 0o600)
@@ -150,6 +178,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 'violations': [],
                 'violations.ignore': [],
                 'ignore': [],
+                '_baserules': None,
             }
             # figure out bases we are using
             basemode = self.config['logcheck']['basemode']
@@ -158,6 +187,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
             baserules = self.config['logcheck']['baserules']
             if 'baserules' in host:
                 baserules = host['baserules']
+            hostconfig['_baserules'] = baserules
             # add bases - these have to have the full set of directories
             for category in ['cracking', 'cracking.ignore', 'violations', 'violations.ignore']:
                 hostconfig[category].append(os.path.join(baserules, '{}.d'.format(category)))
@@ -197,9 +227,24 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         # populate directory states
         for host in self.hosts:
             for check in self.hosts[host]:
+                if check == '_baserules':
+                    continue
                 for path in self.hosts[host][check]:
                     if path not in self.dirstate:
                         self.dirstate[path] = 0.0    # set zero start time to force files to be checked
+        # prepopulate existing stats for all the rules
+        self.dbcur.execute('SELECT * FROM RulesStatsLines INNER JOIN RulesStatsFiles ON RulesStatsLines.RulesStatsFile_id = RulesStatsFiles.id')
+        for row in self.dbcur:
+            #self.logger.info("existing stat: %s", str(dict(row)))
+            if row['RulesPath'] not in self.rules:
+                self.rules[row['RulesPath']] = {}
+            if row['RulesFilename'] not in self.rules[row['RulesPath']]:
+                self.rules[row['RulesPath']][row['RulesFilename']] = {}
+            self.rules[row['RulesPath']][row['RulesFilename']][row['LineSHA1']] = {
+                'count': row['MatchedCount'],
+                'last_used': -1 if row['MatchedLast'] is None else row['MatchedLast'],
+                'time_added': row['Added'],
+            }
         # now update (read) all the rules for the first time
         self.rulesupdate(True)
         # read LogPosition from database, cleanup unconfigured logs from database
@@ -222,6 +267,115 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         if self.dbcur.fetchone()['COUNT(*)'] > 0:
             self._send()
 
+    def store_stats(self):
+        """Store stats generated"""
+        # work out all basepaths - these will be ignored, only custom rules reported TODO
+        # TODO or should we mark these at load time
+        basepaths = [hostconfig['_baserules'] for hostconfig in self.hosts.values()]
+        # prune gone away files from stats
+        prune_files = []
+        self.dbcur.execute('SELECT * FROM RulesStatsFiles')
+        for row in self.dbcur:
+            # check for a missing path/directory
+            if row['RulesPath'] not in self.rules:
+                prune_files.append(row['id'])
+                continue
+            # see if this is below one of the basepaths - always has extra category dir
+            if os.path.dirname(row['RulesPath'].rstrip(os.sep)) in basepaths:
+                prune_files.append(row['id'])
+                continue
+            # check for a missing file
+            if row['RulesFilename'] not in self.rules[row['RulesPath']]:
+                prune_files.append(row['id'])
+                continue
+        for prune_id in prune_files:
+            self.dbcur.execute('DELETE FROM RulesStatsLines WHERE RulesStatsFile_id = ?', [prune_id])
+            self.dbcur.execute('DELETE FROM RulesStatsFiles WHERE id = ?', [prune_id])
+        # prune gone away rules from stats
+        prune_sha1s = []
+        self.dbcur.execute('SELECT * FROM RulesStatsLines INNER JOIN RulesStatsFiles ON RulesStatsLines.RulesStatsFile_id = RulesStatsFiles.id')
+        for row in self.dbcur:
+            rules = self.rules[row['RulesPath']][row['RulesFilename']]
+            if row['LineSHA1'] not in rules:
+                prune_sha1s.append(row['id'])
+        for prune_id in prune_sha1s:
+            self.dbcur.execute('DELETE FROM RulesStatsFiles WHERE id = ?', [prune_id])
+        # done pruning
+        self.db.commit()
+        # update stats
+        for path in self.rules:
+            # see if this is below one of the basepaths - always has extra category dir
+            if os.path.dirname(path.rstrip(os.sep)) in basepaths:
+                continue
+            # process each file
+            for item in self.rules[path]:
+                self.dbcur.execute('SELECT id FROM RulesStatsFiles WHERE RulesPath = ? AND RulesFilename = ?', [path, item])
+                file_id = self.dbcur.fetchone()
+                file_id = None if file_id is None else file_id['id']
+                if file_id is None:
+                    self.dbcur.execute('INSERT INTO RulesStatsFiles (RulesPath, RulesFilename) VALUES (?, ?)', [path, item])
+                    file_id = self.dbcur.lastrowid
+                for sha1, stats in self.rules[path][item].items():
+                    self.dbcur.execute('SELECT COUNT(*) FROM RulesStatsLines WHERE RulesStatsFile_id = ? AND LineSHA1 = ?', [file_id, sha1])
+                    if self.dbcur.fetchone()['COUNT(*)']:
+                        # update
+                        self.dbcur.execute(
+                            'UPDATE RulesStatsLines SET LineNum = ?, Added = ?, MatchedLast = ?, MatchedCount = ? WHERE RulesStatsFile_id = ? AND LineSHA1 = ?',
+                            [
+                                stats['line_number'], stats['time_added'], stats['last_used'] if stats['last_used'] > 0 else None, stats['count'],
+                                file_id, sha1,
+                            ]
+                        )
+                    else:
+                        # insert
+                        self.dbcur.execute(
+                            'INSERT INTO RulesStatsLines (RulesStatsFile_id, LineSHA1, LineNum, Added, MatchedLast, MatchedCount) VALUES (?, ?, ?, ?, ?, ?)',
+                            [
+                                file_id, sha1,
+                                stats['line_number'], stats['time_added'], stats['last_used'] if stats['last_used'] > 0 else None, stats['count'],
+                            ]
+                        )
+                self.db.commit()
+
+    def report_unused(self):
+        report_time = self.config['common'].get('report_unused_rules_days')
+        if not report_time:
+            # we don't report
+            return
+        report_time *= 86400    # in seconds
+        # work out all basepaths - these will be ignored, only custom rules reported TODO
+        # TODO or should we mark these at load time
+        basepaths = [hostconfig['_baserules'] for hostconfig in self.hosts.values()]
+        # TODO reporting
+        self.logger.info("stats ----------------")
+        time_now = int(time.time())
+        #newest = time_now - 7200
+        newest = time_now - report_time
+        for path in self.rules:
+            # see if this is below one of the basepaths - always has extra category dir
+            if os.path.dirname(path.rstrip(os.sep)) in basepaths:
+                continue
+            # skip ignores
+            ignore = False
+            for pattern in self.config['common'].get('unused_rules_ignore', []):
+                if fnmatch.fnmatchcase(path, pattern):
+                    ignore = True
+                    break
+            if ignore:
+                continue
+            # generate report
+            for item in self.rules[path]:
+                for sha1, stats in self.rules[path][item].items():
+                    if stats['time_added'] > newest:
+                        continue    # too new
+                    if stats['last_used'] >= newest:
+                        continue
+                    report_stats = stats.copy()
+                    del report_stats['regex']
+                    self.logger.info("stats %s: %s %s", os.path.join(path, item), sha1, str(report_stats))
+
+
+
     # read in a rules file
     def _readrules(self, path, item):
         """Read in a rules file
@@ -232,7 +386,12 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         time_now = int(time.time())
         file_path = os.path.join(path, item)
         with open(file_path, 'rt') as f_rules:
-            lines = f_rules.read().splitlines()
+            try:
+                lines = f_rules.read().splitlines()
+            except UnicodeDecodeError as exc:
+                self.logger.exception("Failed reading %s || %s | %s", file_path, path, item)
+                raise
+
             rules = {}
             existing_rules = self.rules.get(path, {}).get(item, {})
             for line_number, line in enumerate(lines):  # identify comments and blanks
@@ -259,13 +418,13 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                         }
                     )
                     # always use latest file contents
-                    rule['line_number'] = line_number + 1,    # human number
+                    rule['line_number'] = line_number + 1   # human number
                     rule['regex'] = re.compile(pyline)
                     # sanity check
-                    if rule['regex'].search(''):
+                    if rule['regex'].search('') or len(pyline) <= 3:
                         # this should not match anything - we have a wildcard line
                         self._special(
-                            'Bad line {} in "{}" (wildcard?) ignored: "{}"'.format(
+                            'Bad line {} in "{}" (broad matching) ignored: "{}"'.format(
                                 line_number + 1,
                                 os.path.join(path, item),
                                 line
@@ -304,7 +463,7 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
                 if not os.path.isfile(os.path.join(path, item)):
                     # we only do files
                     continue
-                if os.path.getmtime(os.path.join(path, item)) >= self.dirstate[path] or item not in self.rules[path]:
+                if os.path.getmtime(os.path.join(path, item)) >= self.dirstate[path] or item not in self.rules[path] or startup:
                     # we need to read in this file
                     self._readrules(path, item)
                     if not startup:
@@ -532,6 +691,13 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         # bail if it's not time to check
         if not self.checktimer.timer():
             return
+        # check reporting of unused rules
+        if self.unused_report_timer is not None:
+            if self.unused_report_timer.timer():
+                self.logger.debug("autocheck() unused rule reporting")
+                # run store and reporting
+                self.store_stats()
+                self.report_unused()
         # run full set of logs
         self.logger.debug("autocheck() check logs")
         self.check_all_logs()
@@ -571,7 +737,10 @@ CREATE TABLE IF NOT EXISTS `LogReport` (
         # query in order of priority, then host
         for priority in ['special', 'cracking', 'violations', 'normal']:
             for host in self.hostorder:
-                self.dbcur.execute('SELECT * FROM LogReport WHERE Priority = ? AND Host = ? ORDER BY LogFile,Time', [priority, host])
+                self.dbcur.execute(
+                    'SELECT * FROM LogReport WHERE Priority = ? AND Host = ? ORDER BY LogFile,Time',
+                    [priority, host]
+                )
                 for row in self.dbcur:
                     if row['LogFile'] != logfile:
                         messagelines.append('')
@@ -604,15 +773,22 @@ class RunDaemon:
         self.running = True
 
     def loop(self):
+        rules = None
         try:
             self.logger.info("starting daemon")
             rules = LogRules(self.logger, self.config)
             self.logger.info("entering loop")
             while self.running:
                 rules.autocheck()
-                time.sleep(5.0 + 2.0 * random.random())
+                delay = 5.0 + 2.0 * random.random() # TODO make cycle configurable
+                while self.running and delay > 0.0:
+                    time.sleep(max(1.0, delay))
+                    delay -= 1.0
         except Exception:   # pylint: disable=broad-except
             self.logger.exception("Exception caught")
+        if rules is not None:
+            rules.store_stats()
+            rules.report_unused()
 
     def stop(self, *args):
         self.running = False
@@ -633,7 +809,7 @@ def main():
     syslog_handler.setFormatter(
         logging.Formatter(
             # TODO should this depend on debug mode?
-            '%(name)s[%(process)d] [%(levelname)s] %(message)s (%(filename)s:%(lineno)d)'
+            '%(name)s[%(process)d]: [%(levelname)s] %(message)s (%(filename)s:%(lineno)d)'
         )
     )
     syslog_handler.setLevel(log_level)
