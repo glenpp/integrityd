@@ -343,14 +343,12 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
             # we don't report
             return
         report_time *= 86400    # in seconds
-        # work out all basepaths - these will be ignored, only custom rules reported TODO
-        # TODO or should we mark these at load time
+        # work out all basepaths - these will be ignored, only custom rules reported
         basepaths = [hostconfig['_baserules'] for hostconfig in self.hosts.values()]
-        # TODO reporting
-        self.logger.info("stats ----------------")
         time_now = int(time.time())
         #newest = time_now - 7200
         newest = time_now - report_time
+        report_paths = []
         for path in self.rules:
             # see if this is below one of the basepaths - always has extra category dir
             if os.path.dirname(path.rstrip(os.sep)) in basepaths:
@@ -363,16 +361,25 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                     break
             if ignore:
                 continue
-            # generate report
-            for item in self.rules[path]:
-                for sha1, stats in self.rules[path][item].items():
-                    if stats['time_added'] > newest:
-                        continue    # too new
-                    if stats['last_used'] >= newest:
-                        continue
-                    report_stats = stats.copy()
-                    del report_stats['regex']
-                    self.logger.info("stats %s: %s %s", os.path.join(path, item), sha1, str(report_stats))
+            report_paths.append(path)
+        if report_paths:
+            self.logger.info("unused rules report ----------------")
+            for path in report_paths:
+                # generate report
+                for item in self.rules[path]:
+                    for sha1, stats in self.rules[path][item].items():
+                        if stats['time_added'] > newest:
+                            continue    # too new
+                        if stats['last_used'] >= newest:
+                            continue
+                        report_stats = stats.copy()
+                        self.logger.info(
+                            "stats %s: line %d, sha1 %s added %s",
+                            os.path.join(path, item),
+                            report_stats['line_number'],
+                            sha1,
+                            time.strftime('%Y-%m-%d', report_stats['time_added']),
+                        )
 
 
 
