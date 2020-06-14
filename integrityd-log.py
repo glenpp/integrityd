@@ -390,6 +390,8 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
             for report_log in report_patterns:
                 self.logger.info(*report_log)
             self.logger.info("unused rules report end ------------------")
+        else:
+            self.logger.info("unused rules report: no unused rules") 
 
 
 
@@ -464,6 +466,10 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
 
     # run through rules directories updating them
     def rulesupdate(self, startup=False):
+        """Update rules files if they change
+
+        :param startup: bool, default false, initial startup cycle
+        """
         # we need to check all paths for updates
         mtimes = {}    # new/updated directories
         files_gone = []    # deleted files to remove from rules after
@@ -784,12 +790,21 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
 
 
 class RunDaemon:
+    """Main loop handler
+    """
     def __init__(self, logger, config):
+        """Constructor
+
+        :param logger: logging object, passed through to log
+        :param config: dict, loaded config file
+        """
         self.logger = logger
         self.config = config
         self.running = True
 
     def loop(self):
+        """Run main loop to check logs
+        """
         rules = None
         try:
             self.logger.info("starting daemon")
@@ -808,6 +823,8 @@ class RunDaemon:
             rules.report_unused()
 
     def stop(self, *args):
+        """Set loop to exit
+        """
         self.running = False
 
 
