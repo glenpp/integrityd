@@ -268,7 +268,8 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
             self._send()
 
     def store_stats(self):
-        """Store stats generated"""
+        """Store stats generated to database (make persistant)
+        """
         # work out all basepaths - these will be ignored, only custom rules reported TODO
         # TODO or should we mark these at load time
         basepaths = [hostconfig['_baserules'] for hostconfig in self.hosts.values()]
@@ -350,40 +351,45 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
         time_now = int(time.time())
         #newest = time_now - 7200
         newest = time_now - report_time
-        report_paths = []
+        report_patterns = []
         for path in self.rules:
             # see if this is below one of the basepaths - always has extra category dir
             if os.path.dirname(path.rstrip(os.sep)) in basepaths:
                 continue
-            # skip ignores
-            ignore = False
-            for pattern in self.config['common'].get('unused_rules_ignore', []):
-                if fnmatch.fnmatchcase(path, pattern):
-                    ignore = True
-                    break
-            if ignore:
-                continue
-            report_paths.append(path)
-        if report_paths:
-            self.logger.info("unused rules report ----------------")
-            for path in report_paths:
-                # generate report
-                for item in self.rules[path]:
-                    for sha1, stats in self.rules[path][item].items():
-                        if stats['time_added'] > newest:
-                            continue    # too new
-                        if stats['last_used'] >= newest:
-                            continue
-                        report_stats = stats.copy()
-                        self.logger.info(
+            # work out ignores
+            for item in self.rules[path]:
+                full_path = os.path.join(path, item)
+                ignore = False
+                for pattern in self.config['common'].get('unused_rules_ignore', []):
+                    if fnmatch.fnmatchcase(full_path, pattern):
+                        ignore = True
+                        break
+                if ignore:
+                    continue
+                # check there are items to report
+                for sha1, stats in self.rules[path][item].items():
+                    if stats['time_added'] > newest:
+                        continue    # too new
+                    if stats['last_used'] >= newest:
+                        continue
+                    # we got an item that should be reported
+                    report_patterns.append(
+                        [
                             "stats %s: line %d, sha1 %s added %s last used %s count %d",
                             os.path.join(path, item),
-                            report_stats['line_number'],
+                            stats['line_number'],
                             sha1,
-                            time.strftime('%Y-%m-%d', time.localtime(report_stats['time_added'])),
-                            time.strftime('%Y-%m-%d', time.localtime(report_stats['last_used'])) if stats['last_used'] > 0 else 'NEVER',
-                            report_stats['count'],
-                        )
+                            time.strftime('%Y-%m-%d', time.localtime(stats['time_added'])),
+                            #time.strftime('%Y-%m-%d', time.localtime(stats['last_used'])) if stats['last_used'] > 0 else 'NEVER',
+                            '{:0.1f} days'.format((time_now - stats['last_used']) / 86400) if stats['last_used'] > 0 else 'NEVER',
+                            stats['count'],
+                        ]
+                    )
+        if report_patterns:
+            self.logger.info("unused rules report start ----------------")
+            for report_log in report_patterns:
+                self.logger.info(*report_log)
+            self.logger.info("unused rules report end ------------------")
 
 
 
