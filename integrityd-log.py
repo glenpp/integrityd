@@ -338,6 +338,8 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 self.db.commit()
 
     def report_unused(self):
+        """Report (log) patterns that have not been used for the configured period
+        """
         report_time = self.config['common'].get('report_unused_rules_days')
         if not report_time:
             # we don't report
@@ -374,11 +376,13 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                             continue
                         report_stats = stats.copy()
                         self.logger.info(
-                            "stats %s: line %d, sha1 %s added %s",
+                            "stats %s: line %d, sha1 %s added %s last used %s count %d",
                             os.path.join(path, item),
                             report_stats['line_number'],
                             sha1,
                             time.strftime('%Y-%m-%d', time.localtime(report_stats['time_added'])),
+                            time.strftime('%Y-%m-%d', time.localtime(report_stats['last_used'])) if stats['last_used'] > 0 else 'NEVER',
+                            report_stats['count'],
                         )
 
 
