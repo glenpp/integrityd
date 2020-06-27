@@ -35,6 +35,7 @@ import subprocess
 import random
 import socket
 import signal
+import warnings
 import logging
 import logging.handlers
 import hashlib
@@ -391,7 +392,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 self.logger.info(*report_log)
             self.logger.info("unused rules report end ------------------")
         else:
-            self.logger.info("unused rules report: no unused rules") 
+            self.logger.info("unused rules report: no unused rules")
 
 
 
@@ -438,7 +439,20 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                     )
                     # always use latest file contents
                     rule['line_number'] = line_number + 1   # human number
-                    rule['regex'] = re.compile(pyline)
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('error')
+                        try:
+                            rule['regex'] = re.compile(pyline)
+                        except Warning as wrn:
+                            self._special(
+                                'Bad line {} in "{}" (warning: {}) ignored: "{}"'.format(
+                                    line_number + 1,
+                                    os.path.join(path, item),
+                                    wrn,
+                                    line
+                                )
+                            )
+                            continue
                     # sanity check
                     if rule['regex'].search('') or len(pyline) <= 3:
                         # this should not match anything - we have a wildcard line
