@@ -52,7 +52,7 @@ class FileCheck:
         self.file_target_time = 0   # time when next file should be processed
         self.per_file_time = None   # set by _setfastmode()
         self.reitterate = False
-        self._running = False
+        self._running = True
         # checksum properties
         self.block_size = 4096
         self.byterate_current = float(config['common']['byterate'])
@@ -195,6 +195,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
 
     def _sha1file(self, node):
         """Checksum a single node (file)
+
+        :return: str|None|False, sha1 hex checksum, None on no fail, False on rapid exit
         """
         if DEBUG:
             print("_sha1file({})".format(node))
@@ -218,6 +220,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                 data = ' '  # we start with something as the "last read" to ensure the loop starts
                 blockcount = 0
                 while data:
+                    if not self._running:
+                        return False
                     data = f_check.read(self.block_size)
                     sha.update(data)
                     blockcount += 1
@@ -311,6 +315,8 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
                 if os.path.isfile(node['Path']):
                     nodenow['Type'] = 'File'
                     nodenow['SHA1'] = self._sha1file(nodenow)
+                    if not self._running:
+                        return
 #                    print nodenow['SHA1']
                 elif os.path.isdir(node['Path']):
                     nodenow['Type'] = 'Directory'
@@ -422,7 +428,6 @@ CREATE TABLE IF NOT EXISTS `NodeInfo` (
         """
         # get nodes for this cycle up to number
         # TODO possibly prioritise directories - a delta there means something in them has changed TODO
-        self._running = True
         self.dbcur.execute("SELECT * FROM NodeInfo WHERE ForceCheck = 1 LIMIT ?", [number])
 #        self.dbcur.execute("SELECT * FROM NodeInfo WHERE ForceCheck = 1 ORDER BY RANDOM() LIMIT ?", [number])
         nodes = [row for row in self.dbcur]
