@@ -236,7 +236,6 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
         # prepopulate existing stats for all the rules
         self.dbcur.execute('SELECT * FROM RulesStatsLines INNER JOIN RulesStatsFiles ON RulesStatsLines.RulesStatsFile_id = RulesStatsFiles.id')
         for row in self.dbcur:
-            #self.logger.info("existing stat: %s", str(dict(row)))
             if row['RulesPath'] not in self.rules:
                 self.rules[row['RulesPath']] = {}
             if row['RulesFilename'] not in self.rules[row['RulesPath']]:
@@ -418,15 +417,22 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 if not line or line.startswith('#'):
                     continue
                 sha1 = hashlib.sha1((file_path + '\0' + line).encode('utf-8')).hexdigest()
-                # TODO this is a very crude change over for translating perl/grep into python TODO
+                # TODO this is a very crude change over for translating perl/posix into python TODO
+                # see https://www.regular-expressions.info/posixbrackets.html
                 pyline = line
-                pyline = re.sub(r'\[:alnum:\]', 'a-zA-Z0-9', pyline)
-                pyline = re.sub(r'\[:alpha:\]', 'a-zA-Z', pyline)
-                pyline = re.sub(r'\[:digit:\]', '0-9', pyline)
-                pyline = re.sub(r'\[:lower:\]', 'a-z', pyline)
-                pyline = re.sub(r'\[:space:\]', r'\\s', pyline)
-                pyline = re.sub(r'\[:upper:\]', 'A-Z', pyline)
-                pyline = re.sub(r'\[:xdigit:\]', '0-9a-fA-F', pyline)
+                pyline = pyline.replace('[:alnum:]', 'a-zA-Z0-9')
+                pyline = pyline.replace('[:alpha:]', 'a-zA-Z')
+                pyline = pyline.replace('[:blank:]', r' \t')
+                # pyline = pyline.replace('[:cntrl:]', '')  # TODO
+                pyline = pyline.replace('[:digit:]', r'\d')
+                pyline = pyline.replace('[:graph:]', '\x00-\x7f')
+                pyline = pyline.replace('[:lower:]', 'a-z')
+                # pyline = pyline.replace('[:rint:]', '')  # TODO
+                # pyline = pyline.replace('[:punct:]', '')  # TODO
+                pyline = pyline.replace('[:space:]', r'\s')
+                pyline = pyline.replace('[:upper:]', 'A-Z')
+                pyline = pyline.replace('[:word:]', r'\w')
+                pyline = pyline.replace('[:xdigit:]', '0-9a-fA-F')
                 # generate the compiled expression
                 try:
                     rule = existing_rules.get(
@@ -517,9 +523,17 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
         # update all dirstates
         for path in mtimes:
             self.dirstate[path] = mtimes[path]
+        # cleanup items gone away
         for item in files_gone:
             self._special('Removing rule file: {} "{}" "{}"'.format(os.path.join(item[0], item[1]), item[0], item[1]))    # inform
             del self.rules[item[0]][item[1]]    # TODO this has a key error
+        paths_gone = []
+        for path in self.rules:
+            if path not in self.dirstate:
+                paths_gone.append(path)
+        for path in paths_gone:
+            self._special('Removing rule path: {}'.format(path))
+            del self.rules[path]
 
 
     def _read_lines(self, fd_log, lines):
@@ -878,7 +892,7 @@ def main():
     # read in conf
     logger.info("reading config from: %s", configfile)
     with open(configfile, 'rt') as f_config:
-        config = yaml.load(f_config)
+        config = yaml.safe_load(f_config)
 
     # with systemd just let it handle things
     runner = RunDaemon(logger, config)
