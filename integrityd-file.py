@@ -553,7 +553,7 @@ def main():
     # read in conf
     logger.info("reading config from: %s", configfile)
     with open(configfile, 'rt') as f_config:
-        config = yaml.load(f_config)
+        config = yaml.safe_load(f_config)
 
     # if not specified in the config, add cycletime interval
     if 'cycletimeinterval' not in config['common']:
