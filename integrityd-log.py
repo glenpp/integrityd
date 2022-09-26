@@ -113,6 +113,7 @@ class LogRules:
         self.hostorder = ['__HOST__']    # hosts in configuration order (which we send reports in)
         self.logpositions = {}
         self.logfiles = {}    # lists by host
+        self.logfiles_transient = {}    # lists by host - for logfiles (also in above) to be ignored if not available
         self.checktimer = Timer(self.config['logcheck']['checkinterval'])
         self.rulesupdatetimer = Timer(self.config['logcheck']['rulesfreshness'])
         self.holdofftime = 0    # startup with no holdoff
@@ -223,7 +224,8 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                     hostconfig['ignore'].append(host['localrules'])
             # we should now have all the config for this host
             self.hosts[host['name']] = hostconfig
-            self.logfiles[host['name']] = host['logfiles']
+            self.logfiles[host['name']] = host['logfiles'] + host.get('logfiles_transient', [])
+            self.logfiles_transient[host['name']] = host.get('logfiles_transient', [])
             self.hostorder.append(host['name'])
         # populate directory states
         for host in self.hosts:
@@ -560,12 +562,13 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
         return size
 
 
-    def _readlog(self, logfile, lastinode, lastposition):
+    def _readlog(self, logfile, lastinode, lastposition, transient=False):
         """Read a log file, continuing on from previous when rotated
 
-        :arg logfile: str, path to log file
-        :arg lastinode: int, last inode the file was on
-        :arg lastposition: int, last position (for seek) from start of file that was read to
+        :param logfile: str, path to log file
+        :param lastinode: int, last inode the file was on
+        :param lastposition: int, last position (for seek) from start of file that was read to
+        :param transient: bool, if the file is not always available and should be ignored
         :return: tuple of:
             int, last inode the file was on (may have changed with rotated file)
             int, last position (for seek) from start of file that was read to
@@ -576,7 +579,9 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
         try:
             fd_log = os.open(logfile, os.O_RDONLY)
         except Exception as exc:
-            if logfile not in self.lasterror or self.lasterror[logfile] + self.config['common']['errornag'] > time.time():
+            if transient and exc.__class__ is FileNotFoundError:
+                pass    # skip
+            elif logfile not in self.lasterror or self.lasterror[logfile] + self.config['common']['errornag'] > time.time():
                 self.logger.exception("Failed opening logfile: %s", logfile)    # TODO capture any problems for now
                 self._special("Failed opening logfile \"{}\" with: {}".format(logfile, exc))
                 # set log repeating limit on this file
@@ -675,7 +680,8 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 self.logpositions[host][logfile] = [None, None, False]
             lastposition, lastinode, lines = self._readlog(logfile,
                                                            self.logpositions[host][logfile][0],
-                                                           self.logpositions[host][logfile][1])
+                                                           self.logpositions[host][logfile][1],
+                                                           logfile in self.logfiles_transient[host])
             if lastposition != self.logpositions[host][logfile][0] or lastinode != self.logpositions[host][logfile][1]:
                 self.logpositions[host][logfile] = [lastposition, lastinode, True]
             # now we need to check these against rules

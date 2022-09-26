@@ -55,6 +55,9 @@ logcheck:
       logfiles:
         - /var/log/syslog
         - /var/log/auth.log
+      logfiles_transient:
+        # some logfiles are not always present - eg. after rotation
+        - /var/log/sometimes.log
     - name: container
       localrules: /etc/integrityd/logrules-container
 #      localmode: paranoid
