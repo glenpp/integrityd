@@ -50,7 +50,9 @@ logcheck:
     - name: somemachine
 #      baserules: /etc/logcheck
 #      basemode: paranoid
-      localrules: /etc/integrityd/logrules-somemachine
+      localrules:
+        - /etc/integrityd/logrules-common
+        - /etc/integrityd/logrules-somemachine
 #      localmode: paranoid
       logfiles:
         - /var/log/syslog

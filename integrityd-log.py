@@ -25,7 +25,6 @@ See: https://www.pitt-pladdy.com/blog/_20160711-084204_0100_File_integrity_and_l
 
 """
 
-
 import sys
 import os
 import sqlite3
@@ -40,14 +39,11 @@ import logging
 import logging.handlers
 import hashlib
 import fnmatch
+import textwrap
 import yaml
 
 
-
 DEBUG = False   # if True we run in foreground, console output
-
-
-
 
 
 class Timer:
@@ -77,6 +73,7 @@ class Timer:
         """
         return self.next - time.time()
 
+
 # mailer
 HOSTNAME = socket.gethostname()    # used for subjects etc.
 def send_mail(config, subject, lines):
@@ -100,10 +97,9 @@ def send_mail(config, subject, lines):
         print()
 
 
-
 class LogRules:
-    """Handle log files
-    """
+    """Handle log files"""
+
     def __init__(self, logger, config):
         self.logger = logger
         self.config = config
@@ -130,45 +126,46 @@ class LogRules:
         self.db.row_factory = sqlite3.Row
         self.dbcur = self.db.cursor()
         # put the tables in we need (if we need them)
-        self.dbcur.execute("""
-CREATE TABLE IF NOT EXISTS `LogPosition` (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    Host CHAR(40) NOT NULL,
-    LogFile TEXT NOT NULL UNIQUE,
-    Inode INT UNSIGNED NOT NULL,
-    Position INT UNSIGNED NOT NULL
-)""")
+        self.dbcur.execute(textwrap.dedent("""\
+            CREATE TABLE IF NOT EXISTS `LogPosition` (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Host CHAR(40) NOT NULL,
+                LogFile TEXT NOT NULL UNIQUE,
+                Inode INT UNSIGNED NOT NULL,
+                Position INT UNSIGNED NOT NULL
+            )"""))
         self.dbcur.execute("CREATE INDEX IF NOT EXISTS LogPosition_LogFile ON LogPosition(LogFile)")
-        self.dbcur.execute("""
-CREATE TABLE IF NOT EXISTS `LogReport` (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    Host CHAR(40) NOT NULL,
-    LogFile TEXT NOT NULL,
-    Line TEXT NOT NULL,
-    Priority CHAR(20) NOT NULL,
-    Time INT UNSIGNED NOT NULL DEFAULT 0
-)""")
+        self.dbcur.execute(textwrap.dedent("""\
+            CREATE TABLE IF NOT EXISTS `LogReport` (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Host CHAR(40) NOT NULL,
+                LogFile TEXT NOT NULL,
+                Line TEXT NOT NULL,
+                Priority CHAR(20) NOT NULL,
+                Time INT UNSIGNED NOT NULL DEFAULT 0
+            )"""))
         self.dbcur.execute("CREATE INDEX IF NOT EXISTS LogReport_Priority ON LogReport(Priority)")
         # track usage of indiviual rules
-        self.dbcur.execute("""
-CREATE TABLE IF NOT EXISTS `RulesStatsFiles` (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    RulesPath TEXT NOT NULL,
-    RulesFilename TEXT NOT NULL
-)""")
+        self.dbcur.execute(textwrap.dedent("""\
+            CREATE TABLE IF NOT EXISTS `RulesStatsFiles` (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                RulesPath TEXT NOT NULL,
+                RulesFilename TEXT NOT NULL
+            )"""))
         self.dbcur.execute("CREATE UNIQUE INDEX IF NOT EXISTS RulesStatsFiles_path ON RulesStatsFiles(RulesPath, RulesFilename)")
-        self.dbcur.execute("""
-CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    RulesStatsFile_id INT UNSIGNED NOT NULL,
-    LineSHA1 CHAR(40) NOT NULL,
-    LineNum INT UNSIGNED NOT NULL,
-    Added INT UNSIGNED NOT NULL,
-    MatchedLast INT UNSIGNED,
-    MatchedCount INT UNSIGNED NOT NULL,
-    FOREIGN KEY(RulesStatsFile_id) REFERENCES RulesStatsFiles(id)
-)""")
+        self.dbcur.execute(textwrap.dedent("""\
+            CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                RulesStatsFile_id INT UNSIGNED NOT NULL,
+                LineSHA1 CHAR(40) NOT NULL,
+                LineNum INT UNSIGNED NOT NULL,
+                Added INT UNSIGNED NOT NULL,
+                MatchedLast INT UNSIGNED,
+                MatchedCount INT UNSIGNED NOT NULL,
+                FOREIGN KEY(RulesStatsFile_id) REFERENCES RulesStatsFiles(id)
+            )"""))
         self.dbcur.execute("CREATE UNIQUE INDEX IF NOT EXISTS RulesStatsLines_sha1 ON RulesStatsLines(RulesStatsFile_id, LineSHA1)")
+        self.dbcur.execute("VACUUM")
         self.db.commit()
         # make sure the database is not accessible by others
         os.chmod(self.config['common']['database'], 0o600)
@@ -192,36 +189,39 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
             hostconfig['_baserules'] = baserules
             # add bases - these have to have the full set of directories
             for category in ['cracking', 'cracking.ignore', 'violations', 'violations.ignore']:
-                hostconfig[category].append(os.path.join(baserules, '{}.d'.format(category)))
+                hostconfig[category].append(os.path.join(baserules, f'{category}.d'))
             hostconfig['ignore'].append(os.path.join(baserules, 'ignore.d.paranoid'))
             if basemode in ['workstation', 'server']:
                 hostconfig['ignore'].append(os.path.join(baserules, 'ignore.d.server'))
             if basemode in ['workstation']:
                 hostconfig['ignore'].append(os.path.join(baserules, 'ignore.d.workstation'))
             # now add local rules, assuming they are all ignores if there are no dirs
-            gotrules = False
             if 'localrules' in host:
-                for category in ['cracking', 'cracking.ignore', 'violations', 'violations.ignore']:
-                    if os.path.isdir(os.path.join(host['localrules'], '{}.d'.format(category))):
-                        hostconfig[category].append(os.path.join(host['localrules'], '{}.d'.format(category)))
+                localmode = host.get('localmode', basemode)
+                localrules = host['localrules']
+                if not isinstance(localrules, list):
+                    localrules = [localrules]
+                    self._special('Bad config "localrules" should be list of rules directories (was string)')
+                for rule_dir in localrules:
+                    gotrules = False
+                    for category in ['cracking', 'cracking.ignore', 'violations', 'violations.ignore']:
+                        if os.path.isdir(os.path.join(rule_dir, f'{category}.d')):
+                            hostconfig[category].append(os.path.join(rule_dir, f'{category}.d'))
+                            gotrules = True
+                    if os.path.isdir(os.path.join(rule_dir, 'ignore.d.paranoid')):
+                        hostconfig['ignore'].append(os.path.join(rule_dir, 'ignore.d.paranoid'))
                         gotrules = True
-                localmode = basemode
-                if 'localmode' in host:
-                    localmode = host['localmode']
-                if os.path.isdir(os.path.join(host['localrules'], 'ignore.d.paranoid')):
-                    hostconfig['ignore'].append(os.path.join(host['localrules'], 'ignore.d.paranoid'))
-                    gotrules = True
-                if localmode in ['workstation', 'server']:
-                    if os.path.isdir(os.path.join(host['localrules'], 'ignore.d.server')):
-                        hostconfig['ignore'].append(os.path.join(host['localrules'], 'ignore.d.server'))
-                        gotrules = True
-                if localmode in ['workstation']:
-                    if os.path.isdir(os.path.join(host['localrules'], 'ignore.d.workstation')):
-                        hostconfig['ignore'].append(os.path.join(host['localrules'], 'ignore.d.workstation'))
-                        gotrules = True
-                # if we didn't get any of the dirs, then assme the directory given is an ignore directory
-                if not gotrules:
-                    hostconfig['ignore'].append(host['localrules'])
+                    if localmode in ['workstation', 'server']:
+                        if os.path.isdir(os.path.join(rule_dir, 'ignore.d.server')):
+                            hostconfig['ignore'].append(os.path.join(rule_dir, 'ignore.d.server'))
+                            gotrules = True
+                    if localmode in ['workstation']:
+                        if os.path.isdir(os.path.join(rule_dir, 'ignore.d.workstation')):
+                            hostconfig['ignore'].append(os.path.join(rule_dir, 'ignore.d.workstation'))
+                            gotrules = True
+                    # if we didn't get any of the dirs, then assme the directory given is an ignore directory
+                    if not gotrules:
+                        hostconfig['ignore'].append(rule_dir)
             # we should now have all the config for this host
             self.hosts[host['name']] = hostconfig
             self.logfiles[host['name']] = host['logfiles'] + host.get('logfiles_transient', [])
@@ -264,7 +264,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 self.dbcur.execute('DELETE FROM LogPosition WHERE id = ?', [rowid])
             self.db.commit()
         # trigger mailing cycle - flush whatever is already in the database
-        self._special('{} starting up'.format(sys.argv[0]))
+        self._special(f'{sys.argv[0]} starting up')
         self.dbcur.execute('SELECT COUNT(*) FROM LogReport')
         if self.dbcur.fetchone()['COUNT(*)'] > 0:
             self._send()
@@ -534,7 +534,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
             if path not in self.dirstate:
                 paths_gone.append(path)
         for path in paths_gone:
-            self._special('Removing rule path: {}'.format(path))
+            self._special(f'Removing rule path: {path}')
             del self.rules[path]
 
 
@@ -558,7 +558,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 size += len(line) + 1   # include \n in count
                 lines.append(line.decode('utf-8', errors='ignore'))
                 if DEBUG:
-                    print("Read line: {}".format(lines[-1]))
+                    print(f"Read line: {lines[-1]}")
         return size
 
 
@@ -583,7 +583,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 pass    # skip
             elif logfile not in self.lasterror or self.lasterror[logfile] + self.config['common']['errornag'] > time.time():
                 self.logger.exception("Failed opening logfile: %s", logfile)    # TODO capture any problems for now
-                self._special("Failed opening logfile \"{}\" with: {}".format(logfile, exc))
+                self._special(f"Failed opening logfile \"{logfile}\" with: {exc}")
                 # set log repeating limit on this file
                 self.lasterror[logfile] = time.time()
             return(lastinode, lastposition, lines)
@@ -591,7 +591,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
         # check it's the same file - ie. rotated and read last lines from before if it has
         if lastinode is not None and stat.st_ino != lastinode:
             if 'logrotationalert' in self.config['logcheck'] and self.config['logcheck']['logrotationalert']:
-                self._special("logfile has been rotated {}".format(logfile))
+                self._special(f"logfile has been rotated {logfile}")
             # this is not the same file - presume logs rotated so find previous and finish it up
             lastlogfile = None
             for lastfile in os.listdir(os.path.dirname(logfile)):
@@ -613,7 +613,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 os.close(fd_lastlog)
             else:
                 # flag and report this
-                self._special("bad - can't find last logfile against {}".format(logfile))
+                self._special(f"bad - can't find last logfile against {logfile}")
             # whatever happens, we now have to start again for the current logfile
             lastposition = None
         # we need to seek to the last valid position
@@ -622,7 +622,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 # assume it's been truncated so start again
                 lastposition = None
                 if 'logrotationalert' in self.config['logcheck'] and self.config['logcheck']['logrotationalert']:
-                    self._special("logfile has been truncated {}".format(logfile))
+                    self._special(f"logfile has been truncated {logfile}")
             else:
                 os.lseek(fd_log, lastposition, os.SEEK_SET)
         if lastposition is None:
@@ -692,7 +692,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                     for rules in self.rules[path].values():
                         matching.extend(rules.values())
                 ignoring = []
-                for path in self.hosts[host]['{}.ignore'.format(category)]:
+                for path in self.hosts[host][f'{category}.ignore']:
                     for rules in self.rules[path].values():
                         ignoring.extend(rules.values())
                 report[category][logfile].extend(self._matchinglines(ignoring, self._matchinglines(matching, lines, True), False))
@@ -771,7 +771,7 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
         oldest = self.dbcur.fetchone()['MIN(Time)']
         timenow = int(time.time())
         if DEBUG:
-            print("autocheck() oldest: {}".format(oldest))
+            print(f"autocheck() oldest: {oldest}")
             if oldest != None:
                 print("autocheck() time until reporttime: {}".format(oldest + self.config['common']['reporttime'] - timenow))
                 print("autocheck() time until holdoff: {}".format(self.holdofftime - timenow))
@@ -801,16 +801,16 @@ CREATE TABLE IF NOT EXISTS `RulesStatsLines` (
                 for row in self.dbcur:
                     if row['LogFile'] != logfile:
                         messagelines.append('')
-                        messagelines.append("{} :: {}".format(priority, row['LogFile']))
-                        messagelines.append('=' * len("{} :: {}".format(priority, row['LogFile'])))
+                        messagelines.append(f"{priority} :: {row['LogFile']}")
+                        messagelines.append('=' * len(f"{priority} :: {row['LogFile']}"))
                         logfile = row['LogFile']
                     messagelines.append(row['Line'])
         # prepend context
         messagelines.insert(0, '')
-        messagelines.insert(0, 'LogReports from {} on {}:'.format(sys.argv[0], HOSTNAME))
+        messagelines.insert(0, f'LogReports from {sys.argv[0]} on {HOSTNAME}:')
         # TODO put in cycletime at end TODO maybe actually in send_mail() function
         # send these
-        send_mail(self.config, 'Log Report for {}'.format(HOSTNAME), messagelines)
+        send_mail(self.config, f'Log Report for {HOSTNAME}', messagelines)
         # nuke these entries
         self.dbcur.execute('DELETE FROM LogReport')
         self.db.commit()
