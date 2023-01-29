@@ -25,7 +25,6 @@ See: https://www.pitt-pladdy.com/blog/_20160711-084204_0100_File_integrity_and_l
 
 """
 
-
 import sys
 import os
 import sqlite3
@@ -36,8 +35,8 @@ import signal
 import logging
 import logging.handlers
 import hashlib
+import textwrap
 import yaml
-
 
 
 DEBUG = False   # if True we run in foreground, console output
@@ -69,29 +68,30 @@ class FileCheck:
         self.db.row_factory = sqlite3.Row
         self.dbcur = self.db.cursor()
         # put the tables in we need (if we need them)
-        self.dbcur.execute("""
-CREATE TABLE IF NOT EXISTS `NodeInfo` (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    Path TEXT NOT NULL UNIQUE,
-    Parent INTEGER REFERENCES NodeInfo(id),
-    LastChecked INT UNSIGNED NOT NULL DEFAULT 0,
-    ForceCheck BOOL NOT NULL DEFAULT 1,
-    Type CHAR(10) NOT NULL,
-    UID INT UNSIGNED NOT NULL,
-    GID INT UNSIGNED NOT NULL,
-    Links INT UNSIGNED NOT NULL,
-    Inode INT UNSIGNED NOT NULL,
-    Perms CHAR(10),
-    CTime INT UNSIGNED NOT NULL,
-    MTime INT UNSIGNED NOT NULL,
-    Size INT UNSIGNED,
-    SHA1 CHAR(40),
-    LinkDest TEXT
-)""")
+        self.dbcur.execute(textwrap.dedent("""\
+            CREATE TABLE IF NOT EXISTS `NodeInfo` (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Path TEXT NOT NULL UNIQUE,
+                Parent INTEGER REFERENCES NodeInfo(id),
+                LastChecked INT UNSIGNED NOT NULL DEFAULT 0,
+                ForceCheck BOOL NOT NULL DEFAULT 1,
+                Type CHAR(10) NOT NULL,
+                UID INT UNSIGNED NOT NULL,
+                GID INT UNSIGNED NOT NULL,
+                Links INT UNSIGNED NOT NULL,
+                Inode INT UNSIGNED NOT NULL,
+                Perms CHAR(10),
+                CTime INT UNSIGNED NOT NULL,
+                MTime INT UNSIGNED NOT NULL,
+                Size INT UNSIGNED,
+                SHA1 CHAR(40),
+                LinkDest TEXT
+            )"""))
         self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_Path ON NodeInfo(Path)')
         self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_Path ON NodeInfo(Parent)')
         self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_LastChecked ON NodeInfo(LastChecked)')
         self.dbcur.execute('CREATE INDEX IF NOT EXISTS NodeInfo_ForceCheck ON NodeInfo(ForceCheck)')
+        self.dbcur.execute("VACUUM")
         self.db.commit()
         # make sure the database is not accessible by others
         os.chmod(self.config['common']['database'], 0o600)
