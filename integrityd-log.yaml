@@ -13,6 +13,8 @@ common:
   reporttime: 30
   # wait this long after a report before sending again (unless high priority)
   reportholdoff: 900
+  # limit number of lines per file
+  report_file_line_limit: 10000
   # how long between nagging on errors
   errornag: 7200
   # optionally, report on unused rules

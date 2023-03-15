@@ -790,21 +790,31 @@ class LogRules:
         if DEBUG:
             print("_send()")
         messagelines = []
-        logfile = None
         # query in order of priority, then host
         for priority in ['special', 'cracking', 'violations', 'normal']:
+            logfile = None
             for host in self.hostorder:
                 self.dbcur.execute(
                     'SELECT * FROM LogReport WHERE Priority = ? AND Host = ? ORDER BY LogFile,Time',
                     [priority, host]
                 )
+                file_count = 0
+                insert_count = None
                 for row in self.dbcur:
                     if row['LogFile'] != logfile:
+                        if insert_count is not None and file_count >= self.config['common']['report_file_line_limit']:
+                            messagelines.insert(insert_count, f"LIMITED - {self.config['common']['report_file_line_limit']} of {file_count}")
+                        file_count = 0
                         messagelines.append('')
                         messagelines.append(f"{priority} :: {row['LogFile']}")
                         messagelines.append('=' * len(f"{priority} :: {row['LogFile']}"))
+                        insert_count = len(messagelines)
                         logfile = row['LogFile']
-                    messagelines.append(row['Line'])
+                    if file_count < self.config['common']['report_file_line_limit']:
+                        messagelines.append(row['Line'])
+                    file_count += 1
+        if insert_count is not None and file_count >= self.config['common']['report_file_line_limit']:
+            messagelines.insert(insert_count, f"LIMITED - {self.config['common']['report_file_line_limit']} of {file_count}")
         # prepend context
         messagelines.insert(0, '')
         messagelines.insert(0, f'LogReports from {sys.argv[0]} on {HOSTNAME}:')
