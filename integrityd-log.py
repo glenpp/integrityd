@@ -103,7 +103,7 @@ class LogRules:
     def __init__(self, logger, config):
         self.logger = logger
         self.config = config
-        self.dirstate = {}    # holds last change times of paths we track
+        self.rules_stat = {}    # directory -> filename -> dict of key stat for checking changes
         self.rules = {}    # holds paths, files below those and lists of rules in those files
         self.hosts = {}    # holds the host, categories and list of paths relevant to the catoegory
         self.hostorder = ['__HOST__']    # hosts in configuration order (which we send reports in)
@@ -233,8 +233,7 @@ class LogRules:
                 if check == '_baserules':
                     continue
                 for path in self.hosts[host][check]:
-                    if path not in self.dirstate:
-                        self.dirstate[path] = 0.0    # set zero start time to force files to be checked
+                    self.rules_stat.setdefault(path, {})    # set empty to force files to be checked TODO can we get() when used rather?
         # prepopulate existing stats for all the rules
         self.dbcur.execute('SELECT * FROM RulesStatsLines INNER JOIN RulesStatsFiles ON RulesStatsLines.RulesStatsFile_id = RulesStatsFiles.id')
         for row in self.dbcur:
@@ -486,29 +485,29 @@ class LogRules:
             # all done
             self.rules[path][item] = rules
 
-    # run through rules directories updating them
     def rulesupdate(self, startup=False):
-        """Update rules files if they change
+        """
+        Update rules files in all directories if they change
 
         :param startup: bool, default false, initial startup cycle
         """
         # we need to check all paths for updates
         mtimes = {}    # new/updated directories
         files_gone = []    # deleted files to remove from rules after
-        for path in self.dirstate:
-            if path not in self.rules:
-                self.rules[path] = {}
-            mtime = os.path.getmtime(path)
-            if self.dirstate[path] == mtime:
-                continue    # nothing in the directory has changed
-            mtimes[path] = mtime    # store to update later
+        for path in self.rules_stat:
+            self.rules.setdefault(path, {})
             for item in os.listdir(path):
                 if item.startswith('.'):
                     continue    # skip hidden files
                 if not os.path.isfile(os.path.join(path, item)):
                     # we only do files
                     continue
-                if os.path.getmtime(os.path.join(path, item)) >= self.dirstate[path] or item not in self.rules[path] or startup:
+                file_stat = os.stat(os.path.join(path, item))
+                file_info = {
+                    'mtime': file_stat.st_mtime_ns,
+                    'size': file_stat.st_size,
+                }
+                if file_info != self.rules_stat[path].get(item) or startup:
                     # we need to read in this file
                     self._readrules(path, item)
                     if not startup:
@@ -516,27 +515,27 @@ class LogRules:
                             self._special('New rule file: {} "{}" "{}"'.format(os.path.join(path, item), path, item))    # inform
                         else:
                             self._special('Updated rule file: {} "{}" "{}"'.format(os.path.join(path, item), path, item))    # inform
+                self.rules_stat[path][item] = file_info
             # check and prune non-existing files
             for item in self.rules[path]:
                 if not os.path.isfile(os.path.join(path, item)):
                     files_gone.append([path, item])
                     if not startup:
                         self._special('Removed rule file: {} "{}" "{}"'.format(os.path.join(path, item), path, item))    # inform
-        # update all dirstates
-        for path in mtimes:
-            self.dirstate[path] = mtimes[path]
         # cleanup items gone away
         for item in files_gone:
             self._special('Removing rule file: {} "{}" "{}"'.format(os.path.join(item[0], item[1]), item[0], item[1]))    # inform
-            del self.rules[item[0]][item[1]]    # TODO this has a key error
+            if item[0] in self.rules and item[1] in self.rules[item[0]]:
+                del self.rules[item[0]][item[1]]
+            if item[0] in self.rules_stat and item[1] in  self.rules_stat[item[0]]:
+                del self.rules_stat[item[0]][item[1]]
         paths_gone = []
         for path in self.rules:
-            if path not in self.dirstate:
+            if path not in self.rules_stat:
                 paths_gone.append(path)
         for path in paths_gone:
             self._special(f'Removing rule path: {path}')
             del self.rules[path]
-
 
     def _read_lines(self, fd_log, lines):
         """Read whole lines from file
@@ -604,10 +603,10 @@ class LogRules:
                         break
                 except FileNotFoundError:
                     pass
-            if lastlogfile != None:
+            if lastlogfile is not None:
                 # we have a valid previous logfile to read
                 fd_lastlog = os.open(lastlogfile, os.O_RDONLY)
-                if lastposition != None:
+                if lastposition is not None:
                     os.lseek(fd_lastlog, lastposition, os.SEEK_SET)
                 self._read_lines(fd_lastlog, lines)
                 os.close(fd_lastlog)
@@ -775,7 +774,7 @@ class LogRules:
             if oldest != None:
                 print("autocheck() time until reporttime: {}".format(oldest + self.config['common']['reporttime'] - timenow))
                 print("autocheck() time until holdoff: {}".format(self.holdofftime - timenow))
-        if oldest != None and timenow >= oldest + self.config['common']['reporttime'] and timenow >= self.holdofftime:
+        if oldest is not None and timenow >= oldest + self.config['common']['reporttime'] and timenow >= self.holdofftime:
             must_send = True
         # mail out iaf needed
         if must_send:
@@ -810,7 +809,7 @@ class LogRules:
                         messagelines.append('=' * len(f"{priority} :: {row['LogFile']}"))
                         insert_count = len(messagelines)
                         logfile = row['LogFile']
-                    if file_count < self.config['common']['report_file_line_limit']:
+                    if file_count < self.config['common']['report_file_line_limit']:    # TODO default or skip?
                         messagelines.append(row['Line'])
                     file_count += 1
         if insert_count is not None and file_count >= self.config['common']['report_file_line_limit']:
@@ -915,8 +914,6 @@ def main():
     signal.signal(signal.SIGTERM, runner.stop)
     runner.loop()
     logger.info("exiting")
-
-
 
 
 if __name__ == '__main__':
