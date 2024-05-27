@@ -42,8 +42,9 @@ import yaml
 DEBUG = False   # if True we run in foreground, console output
 
 
-# main class for tracking node changes
 class FileCheck:
+    """Main class for tracking node changes"""
+
     def __init__(self, logger, config, init=False):
         self.logger = logger
         self.config = config
@@ -52,6 +53,7 @@ class FileCheck:
         self.per_file_time = None   # set by _setfastmode()
         self.reitterate = False
         self._running = True
+        self._cycle_status = config['common'].get('cycle_status')
         # checksum properties
         self.block_size = 4096
         self.byterate_current = float(config['common']['byterate'])
@@ -63,6 +65,8 @@ class FileCheck:
         # track how frequently we sent cycle time info
         self.nextcycletime = time.time() + config['common']['cycletimeinterval']    # count from startup so we don't report immediately
         self.fastmodeend = self.nextcycletime    # sane to prevent reporting inline with cycle time
+        # ensure we have acceptable randomness
+        random.seed()
         # get the database up
         self.db = sqlite3.connect(self.config['common']['database'])
         self.db.row_factory = sqlite3.Row
@@ -172,9 +176,12 @@ class FileCheck:
                     ptr = ptr[part]
                 ptr['leaf'] = True
 
-
-
     def _setfastmode(self, state):
+        """
+        Set the fastmode state
+
+        :param state: bool, if this should be operating in fastmode
+        """
         if state != (self.fastmode > 0):
             # state change
             self.per_file_time = 1.0 / self.config['common']['filerate']
@@ -191,12 +198,14 @@ class FileCheck:
             self.fastmode = int(time.time())    # this is the epoch when a fast cycle is started - LastChecked after this means cycle complete
 
     def _time2str(self, epoch):
+        """Return human formatted time from epoch"""
         return time.strftime('%a, %d %b %Y %H:%M:%S %Z', time.localtime(epoch))
 
     def _sha1file(self, node):
-        """Checksum a single node (file)
+        """
+        Checksum a single node (file)
 
-        :return: str|None|False, sha1 hex checksum, None on no fail, False on rapid exit
+        :returns: str|None|False, sha1 hex checksum, None on no fail, False on rapid exit
         """
         if DEBUG:
             print("_sha1file({})".format(node))
@@ -292,7 +301,10 @@ class FileCheck:
 
 
     def _checknode(self, node):
-        """Check one specific node
+        """
+        Check one specific node
+
+        :param node: dict, existing node row
         """
 #        print node['Path']
         nodenow = {}
@@ -300,7 +312,7 @@ class FileCheck:
             nodenow[field] = node[field]
         # check exclusion
         if self._checkexclude(node['Path']):
-            self.logger.info("remove excluded record: {}".format(node['Path']))
+            self.logger.info("remove excluded record: %s", node['Path'])
             # remove from database
             self.dbcur.execute("DELETE FROM NodeInfo WHERE id = ?", [node['id']])
             return
@@ -339,7 +351,7 @@ class FileCheck:
         except (OSError, NotADirectoryError) as exc:
             # check for deletion (handle it)
             if exc.strerror in ['No such file or directory', 'Not a directory']:
-                self.logger.warning('Deleted {}: {}'.format(node['Type'], node['Path']))
+                self.logger.warning("Deleted %s: %s", node['Type'], node['Path'])
                 parents = [node['id']]
                 while parents:
                     todelete = []
@@ -348,7 +360,7 @@ class FileCheck:
                         for row in self.dbcur:
                             self.reitterate = True    # we have made changes that may impact running list
                             todelete.append(row['id'])
-                            self.logger.warning('+Deleted {}: {}'.format(row['Type'], row['Path']))
+                            self.logger.warning("+Deleted %s: %s", row['Type'], row['Path'])
                         self.dbcur.execute('DELETE FROM NodeInfo WHERE id = ?', [parent])
                     parents = todelete
                 return
@@ -382,7 +394,7 @@ class FileCheck:
             # new node, no need to get into details
             changed = True
             if not self.init:
-                self.logger.warning('New {}: {}'.format(nodenow['Type'], nodenow['Path']))
+                self.logger.warning("New %s: %s", nodenow['Type'], nodenow['Path'])
             changedfields = list(nodenow.keys())
         else:
             for field in node.keys():
@@ -393,7 +405,7 @@ class FileCheck:
                     changed = True
                     changedfields.append(field)
             if changed:
-                self.logger.warning('Changed {}: {}'.format(nodenow['Type'], nodenow['Path']))
+                self.logger.warning("Changed %s: %s", nodenow['Type'], nodenow['Path'])
                 shortpath = re.sub(r'^.+?(.{1,20})$', r'... \1', nodenow['Path'])
                 for field in changedfields:
                     if field in ['CTime', 'MTime']:
@@ -409,20 +421,33 @@ class FileCheck:
         changedfields.append('LastChecked')
         if nodenow['ForceCheck'] != node['ForceCheck']:
             changedfields.append('ForceCheck')
-        items = ', '.join(['%s = ?' % field for field in changedfields])
+        items = ', '.join([f'{field} = ?' for field in changedfields])
         values = [nodenow[field] for field in changedfields]
         values.append(nodenow['id'])
-        self.dbcur.execute("UPDATE NodeInfo SET {} WHERE id = ?".format(items), values)
+        self.dbcur.execute(f"UPDATE NodeInfo SET {items} WHERE id = ?", values)
         if changed:
             # switch to fastmode if needed
             self._setfastmode(True)
             if self.fastmode == 0:
                 self.logger.info('FastMode Start')
 
+    def _cycle_report(self, log_prefix):
+        """
+        Report the cycle completion as log, and file if enabled
 
+        :param log_prefix: str, prefix logs with this information
+        """
+        self.dbcur.execute('SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo')
+        cycle_time = self.dbcur.fetchone()['CycleTime']
+        self.logger.info("%s CycleTime = %d", log_prefix, cycle_time)
+        if self._cycle_status:
+            # TODO atomic writes?
+            with open(self._cycle_status, 'wt') as f_status:
+                yaml.safe_dump({'cycle_time': cycle_time}, f_status)
 
     def cycle(self, number):
-        """Do a cycle of "number" items
+        """
+        Do a cycle of "number" items
 
         :arg number: int, how many nodes to visit/check in this cycle
         """
@@ -462,9 +487,9 @@ class FileCheck:
         if self.fastmode > 0:
             self.dbcur.execute('SELECT MIN(LastChecked) FROM NodeInfo')
             if self.dbcur.fetchone()['MIN(LastChecked)'] > self.fastmode:
+                # nothing remains from before start of fastmode
                 self._setfastmode(False)    # drop out of fastmode
-                self.dbcur.execute('SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo')
-                self.logger.info('FastMode Complete with CycleTime = {:d}'.format(self.dbcur.fetchone()['CycleTime']))
+                self._cycle_report("FastMode Complete with")
                 # next regular cycle can start from now
                 self.fastmodeend = time.time()
                 self.nextcycletime = self.fastmodeend + self.config['common']['cycletimeinterval']
@@ -472,18 +497,14 @@ class FileCheck:
             # check we've cleared the end of the FastMode cycle - only report once we're clear of fastmode
             self.dbcur.execute('SELECT MIN(LastChecked) FROM NodeInfo')
             if self.dbcur.fetchone()['MIN(LastChecked)'] > self.fastmodeend:
-                # regular reporting
-                self.dbcur.execute('SELECT MAX(LastChecked)-MIN(LastChecked) as CycleTime FROM NodeInfo')
-                self.logger.info('RegularMode CycleTime = %d' % self.dbcur.fetchone()['CycleTime'])
+                # nothing remains from before start of fastmode ended - regular reporting
+                self._cycle_report("RegularMode")
                 # next cycle
                 self.nextcycletime += self.config['common']['cycletimeinterval']
 
-
     def stop(self):
-        # allow loops to exit cleanly
+        """Allow loops to exit cleanly themselves"""
         self._running = False
-
-
 
 
 class RunDaemon:

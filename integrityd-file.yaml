@@ -17,6 +17,8 @@ common:
   fastmode: 20
   # report on cycle time every 12 hours (default 24)
   cycletimeinterval: 43200
+  # optional path of yaml file of cycle status (updated on complation)
+  # cycle_status: /var/local/integrityd-file_report.yaml
 
 
 
