@@ -119,62 +119,31 @@ class FileCheck:
                 self.dbcur.execute("INSERT INTO NodeInfo (Path,LastChecked,Type,UID,GID,Links,Inode,CTime,MTime) VALUES (?,0,'New',0,0,0,0,0,0)", [path])
         self.db.commit()
         # break up excludes
-        self.excludes = {'branch': {}}
-        if 'exclude' in self.config['filecheck']:
-            for path in self.config['filecheck']['exclude']:
-                parts = path.split(os.sep)
-                if parts[0] == '':
-                    parts.pop(0)
-                if parts[-1] == '':
-                    parts.pop()
-                ptr = self.excludes
-                for part in parts:
-                    ptr = ptr['branch']
-                    if part not in ptr:
-                        ptr[part] = {
-                            'leaf': False,
-                            'branch': {},
-                        }
-                    ptr = ptr[part]
-                ptr['leaf'] = True
+        self.excludes = self._prep_tree(self.config['filecheck'].get('exclude', []))
         # break up noinodes
-        self.noinodes = {'branch': {}}
-        if 'noinode' in self.config['filecheck']:
-            for path in self.config['filecheck']['noinode']:
-                parts = path.split(os.sep)
-                if parts[0] == '':
-                    parts.pop(0)
-                if parts[-1] == '':
-                    parts.pop()
-                ptr = self.noinodes
-                for part in parts:
-                    ptr = ptr['branch']
-                    if part not in ptr:
-                        ptr[part] = {
-                            'leaf': False,
-                            'branch': {},
-                        }
-                    ptr = ptr[part]
-                ptr['leaf'] = True
+        self.noinodes = self._prep_tree(self.config['filecheck'].get('noinode', []))
         # brek up notime
-        self.notime = {'branch': {}}
-        if 'notime' in self.config['filecheck']:
-            for path in self.config['filecheck']['notime']:
-                parts = path.split(os.sep)
-                if parts[0] == '':
-                    parts.pop(0)
-                if parts[-1] == '':
-                    parts.pop()
-                ptr = self.notime
-                for part in parts:
-                    ptr = ptr['branch']
-                    if part not in ptr:
-                        ptr[part] = {
-                            'leaf': False,
-                            'branch': {},
-                        }
-                    ptr = ptr[part]
-                ptr['leaf'] = True
+        self.notime = self._prep_tree(self.config['filecheck'].get('notime', []))
+
+    def _prep_tree(self, tree_config):
+        tree = {'branch': {}}
+        for path in tree_config:
+            parts = path.split(os.sep)
+            if parts[0] == '':
+                parts.pop(0)
+            if parts[-1] == '':
+                parts.pop()
+            ptr = tree
+            for part in parts:
+                ptr = ptr['branch']
+                if part not in ptr:
+                    ptr[part] = {
+                        'leaf': False,
+                        'branch': {},
+                    }
+                ptr = ptr[part]
+            ptr['leaf'] = True
+        return tree
 
     def _setfastmode(self, state):
         """
@@ -251,6 +220,7 @@ class FileCheck:
             return None
 
     def _checkexclude(self, path):
+        """Check that the path matches an exclusion or object below"""
         parts = path.split(os.sep)
         if parts[0] == '':
             parts.pop(0)
@@ -265,8 +235,7 @@ class FileCheck:
         return excluded
 
     def _checknoinode(self, path):
-        """Check that the path matches an exclusion or object below
-        """
+        """Check that the path matches an exclusion or object below"""
         parts = path.split(os.sep)
         if parts[0] == '':
             parts.pop(0)
@@ -281,7 +250,8 @@ class FileCheck:
         return match
 
     def _checknotime(self, path):
-        """Check that the path exactly matches an exclusion
+        """
+        Check that the path exactly matches an exclusion
 
         Unlike others where this needs an exact match so does not apply to objects below the node (directory)
         """
@@ -443,7 +413,7 @@ class FileCheck:
         if self._cycle_status:
             # TODO atomic writes?
             with open(self._cycle_status, 'wt') as f_status:
-                yaml.safe_dump({'cycle_time': cycle_time}, f_status)
+                yaml.safe_dump({'cycle_time': cycle_time, 'finish_time': int(time.time())}, f_status)
 
     def cycle(self, number):
         """
